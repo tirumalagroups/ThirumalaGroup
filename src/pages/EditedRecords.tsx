@@ -1,18 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
-import Input from '../components/UI/Input';
 import Select from '../components/UI/Select';
-import { supabaseDB } from '../lib/supabaseDatabase';
+import { supabaseDB, User } from '../lib/supabaseDatabase';
 import { useTableMode } from '../contexts/TableModeContext';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
-import jsPDF from 'jspdf';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
-// Fix for jsPDF autotable type
-// @ts-ignore
-import 'jspdf-autotable';
 type AuditLogEntry = {
   id: string;
   cash_book_id: string;
@@ -132,10 +127,9 @@ const EditedRecords = () => {
     try {
       console.log('🔄 Loading Edited Records data...');
       
-      // Load edit audit log, deleted records, users, and distinct edited dates
-      const [log, deletedRecords, users, distinctDates] = await Promise.all([
+      // Load edit audit log, users, and distinct edited dates
+      const [log, users, distinctDates] = await Promise.all([
         supabaseDB.getEditAuditLog(),
-        supabaseDB.getDeletedCashBook(),
         supabaseDB.getUsers(),
         supabaseDB.getDistinctEditedDates(),
       ]);
@@ -143,27 +137,11 @@ const EditedRecords = () => {
       // Set the distinct edited dates for the dropdown
       setEditedDates(distinctDates);
       
-      // Transform deleted records to match audit log format
-      const transformedDeleted = (deletedRecords || []).map((deleted: any) => ({
-        id: `deleted-${deleted.id || Date.now()}`,
-        cash_book_id: deleted.id || '',
-        old_values: JSON.stringify(deleted),
-        new_values: JSON.stringify({ deleted: true }),
-        edited_by: deleted.deleted_by || 'unknown',
-        edited_at: deleted.deleted_at || new Date().toISOString(),
-        action: 'DELETE'
-      }));
-      
-      // Combine edit log and deleted records
-      const combinedLog = [...(log || []), ...transformedDeleted];
-      
-      setAuditLog((combinedLog || []) as AuditLogEntry[]);
+      setAuditLog((log || []) as AuditLogEntry[]);
       setUsers((users || []) as User[]);
       
       console.log(`✅ Loaded Edited Records data:`, {
         editLog: (log || []).length,
-        deletedRecords: (deletedRecords || []).length,
-        totalRecords: combinedLog.length,
         users: (users || []).length,
       });
       
@@ -175,21 +153,15 @@ const EditedRecords = () => {
       
       // Show consolidated message
       const editCount = (log || []).length;
-      const deletedCount = (deletedRecords || []).length;
-      const totalCount = combinedLog.length;
-      if (totalCount > 0) {
+      if (editCount > 0) {
           const isShowingRecords = (log || []).some(rec => rec.action === 'SHOWING_RECORDS' || rec.action === 'SHOWING_RECENT_ENTRIES');
           if (isShowingRecords) {
-            toast.info(`Showing ${totalCount} recent entries from cash_book (no edit history available yet)`);
+            toast(`Showing ${editCount} recent entries from cash_book (no edit history available yet)`);
           } else {
-            if (deletedCount > 0) {
-              toast.success(`Loaded ${editCount} edit records and ${deletedCount} deleted records`);
-            } else {
-              toast.success(`Loaded ${editCount} edit records`);
-            }
+            toast.success(`Loaded ${editCount} edit records`);
           }
       } else {
-        toast.info('No edit records found. This is normal if no records have been modified yet.');
+        toast('No edit records found. This is normal if no records have been modified yet.');
       }
       
     } catch (error) {
@@ -426,18 +398,12 @@ const EditedRecords = () => {
 
   // Check if we're showing recent entries instead of actual edits
   const isShowingRecentEntries = filteredLog.some(rec => rec.action === 'SHOWING_RECENT_ENTRIES');
-  const deletedLog = useMemo(() => {
-    return auditLog.filter(log =>
-      log.action === 'DELETE' || (log.new_values == null && log.old_values != null)
-    );
-  }, [auditLog]);
-  
   return (
     <div className='space-y-4'>
       <ModeLabel />
       <Card
-        title={isShowingRecentEntries ? 'Recent Records (No Edit History Available)' : 'Edited & Deleted Records'}
-        subtitle={isShowingRecentEntries ? `Showing ${filteredLog.length} recent entries` : `Edits: ${filteredLog.length} | Deleted: ${deletedLog.length}`}
+        title={isShowingRecentEntries ? 'Recent Records (No Edit History Available)' : 'Edited Records'}
+        subtitle={isShowingRecentEntries ? `Showing ${filteredLog.length} recent entries` : `Edits: ${filteredLog.length}`}
       >
       <div className='flex flex-wrap gap-3 mb-4 items-end'>
         <Select
@@ -599,50 +565,6 @@ const EditedRecords = () => {
             </div>
           )}
           </div>
-          {/* Deleted Records */}
-          <div className='mt-6'>
-            <h3 className='text-sm font-semibold mb-2'>Deleted Records</h3>
-            {deletedLog.length === 0 ? (
-              <div className='text-gray-500 text-xs'>No deleted records found.</div>
-            ) : (
-              <div className='overflow-x-auto'>
-                <table className='w-full text-xs table-fixed border border-gray-200'>
-                  <thead className='sticky top-0 bg-gray-50 z-10'>
-                    <tr className='border-b border-gray-200'>
-                      <th className='w-12 px-1 py-1 text-left font-medium text-gray-700'>S.No</th>
-                      {FIELDS.map(f => (
-                        <th key={'del-h-'+f.key} className='w-20 px-1 py-1 text-left font-medium text-gray-700'>
-                          {f.label}
-                        </th>
-                      ))}
-                      <th className='w-20 px-1 py-1 text-left font-medium text-gray-700'>Deleted By</th>
-                      <th className='w-24 px-1 py-1 text-left font-medium text-gray-700'>Deleted At</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deletedLog.map((log, idx) => {
-                      const oldObj = log.old_values ? JSON.parse(log.old_values) : {};
-                      return (
-                        <tr key={'del-r-'+log.id} className='border-b border-gray-100 hover:bg-red-50'>
-                          <td className='w-12 px-1 py-1 text-center text-xs'>{idx + 1}</td>
-                          {FIELDS.map(f => (
-                            <td key={'del-c-'+f.key} className='w-20 px-1 py-1 text-xs truncate' title={getFieldDisplay(f.key, oldObj[f.key])}>
-                              {getFieldDisplay(f.key, oldObj[f.key])}
-                            </td>
-                          ))}
-                          <td className='w-20 px-1 py-1 text-xs truncate'>{userMap[log.edited_by] || log.edited_by}</td>
-                          <td className='w-24 px-1 py-1 text-xs'>
-                            {log.edited_at && !isNaN(new Date(log.edited_at).getTime()) ? format(new Date(log.edited_at), 'dd/MM/yyyy HH:mm') : ''}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
         </>
       )}
 

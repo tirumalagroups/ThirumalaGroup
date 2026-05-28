@@ -4,16 +4,15 @@ import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
 import { Driver } from '../lib/supabaseDatabase';
 import { supabaseDB } from '../lib/supabaseDatabase';
-import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
-import { format, differenceInDays } from 'date-fns';
+import { format } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { Edit } from 'lucide-react';
 
 const Drivers: React.FC = () => {
-  const { user } = useAuth();
+  const { mode: tableMode } = useTableMode();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingDriver, setEditingDriver] = useState<Driver | null>(null);
@@ -42,7 +41,7 @@ const Drivers: React.FC = () => {
 
   useEffect(() => {
     loadDrivers();
-  }, []);
+  }, [tableMode]);
 
   const loadDrivers = async () => {
     setLoading(true);
@@ -57,31 +56,7 @@ const Drivers: React.FC = () => {
     }
   };
 
-  const getExpiryStatus = (expiryDate: string) => {
-    const today = new Date();
-    const expiry = new Date(expiryDate);
-    const daysUntilExpiry = differenceInDays(expiry, today);
 
-    if (daysUntilExpiry < 0) {
-      return {
-        status: 'expired',
-        color: 'text-red-600 bg-red-50',
-        days: Math.abs(daysUntilExpiry),
-      };
-    } else if (daysUntilExpiry <= 30) {
-      return {
-        status: 'expiring',
-        color: 'text-orange-600 bg-orange-50',
-        days: daysUntilExpiry,
-      };
-    } else {
-      return {
-        status: 'valid',
-        color: 'text-green-600 bg-green-50',
-        days: daysUntilExpiry,
-      };
-    }
-  };
 
   const handleInputChange = (field: string, value: string) => {
     if (editingDriver) {
@@ -140,8 +115,10 @@ const Drivers: React.FC = () => {
         }
       } else {
         // Add new driver
+        const nextSno = drivers.length > 0 ? Math.max(...drivers.map(d => d.sno || 0)) + 1 : 1;
         const newDriverData = await supabaseDB.addDriver({
           ...newDriver,
+          sno: nextSno,
           license_front_url: licenseFrontUrl,
           license_back_url: licenseBackUrl,
         });
@@ -174,10 +151,6 @@ const Drivers: React.FC = () => {
   const handleEdit = (driver: Driver) => {
     setEditingDriver({ ...driver });
     setShowAddForm(false);
-  };
-
-  const handleCancelEdit = () => {
-    setEditingDriver(null);
   };
 
   return (
@@ -226,9 +199,9 @@ const Drivers: React.FC = () => {
                 <Input
                   label='License Number'
                   value={
-                    editingDriver
+                    (editingDriver
                       ? editingDriver.license_no
-                      : newDriver.license_no
+                      : newDriver.license_no) ?? ''
                   }
                   onChange={value => handleInputChange('license_no', value)}
                   placeholder='License number'
@@ -239,13 +212,13 @@ const Drivers: React.FC = () => {
                   label='License Expiry Date'
                   type='date'
                   value={
-                    editingDriver ? editingDriver.exp_date : newDriver.exp_date
+                    (editingDriver ? editingDriver.exp_date : newDriver.exp_date) ?? ''
                   }
                   onChange={value => handleInputChange('exp_date', value)}
                 />
                 <Input
                   label='Phone'
-                  value={editingDriver ? editingDriver.phone : newDriver.phone}
+                  value={(editingDriver ? editingDriver.phone : newDriver.phone) ?? ''}
                   onChange={value => handleInputChange('phone', value)}
                   placeholder='Phone number'
                 />
@@ -254,7 +227,7 @@ const Drivers: React.FC = () => {
                 <Input
                   label='Address'
                   value={
-                    editingDriver ? editingDriver.address : newDriver.address
+                    (editingDriver ? editingDriver.address : newDriver.address) ?? ''
                   }
                   onChange={value => handleInputChange('address', value)}
                   placeholder='Driver address...'
@@ -262,9 +235,9 @@ const Drivers: React.FC = () => {
                 <Input
                   label='Particulars'
                   value={
-                    editingDriver
+                    (editingDriver
                       ? editingDriver.particulars
-                      : newDriver.particulars
+                      : newDriver.particulars) ?? ''
                   }
                   onChange={value => handleInputChange('particulars', value)}
                   placeholder='Description...'

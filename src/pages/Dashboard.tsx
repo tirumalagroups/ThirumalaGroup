@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { format } from 'date-fns';
-import { useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { format, differenceInDays, subDays } from 'date-fns';
 import Card from '../components/UI/Card';
 import Select from '../components/UI/Select';
 import Input from '../components/UI/Input';
@@ -9,6 +9,7 @@ import { supabaseDB } from '../lib/supabaseDatabase';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
+import { getTableName } from '../lib/tableNames';
 import { useDashboardStats, useCompanyBalances, useDropdownData, useInvalidateDashboard } from '../hooks/useDashboardData';
 import ModeLabel from '../components/UI/ModeLabel';
 import toast from 'react-hot-toast';
@@ -30,15 +31,38 @@ import {
 } from 'lucide-react';
 
 const Dashboard: React.FC = () => {
+  const navigate = useNavigate();
   const { user, changePassword } = useAuth();
   const { mode: tableMode, isITRMode } = useTableMode();
-  const location = useLocation();
   const [selectedDate, setSelectedDate] = useState(
     format(new Date(), 'yyyy-MM-dd')
   );
   const [userCredentials, setUserCredentials] = useState<any[]>([]);
   const [showCredentials, setShowCredentials] = useState(true);
-  
+
+  // Expiry states
+  const [vehicleStats, setVehicleStats] = useState<{ expired: number; expiring: number } | null>(null);
+  const [bgStats, setBgStats] = useState<{ expired: number; expiring: number } | null>(null);
+  const [driverStats, setDriverStats] = useState<{ expired: number; expiring: number } | null>(null);
+
+  // Today summary state
+  const [todaySummary, setTodaySummary] = useState<{
+    entries: number;
+    credit: number;
+    debit: number;
+    pending: number;
+  } | null>(null);
+  const [todayLoading, setTodayLoading] = useState(false);
+
+  // Company Balances filtering & sorting
+  const [companySearch, setCompanySearch] = useState('');
+  const [balanceFilter, setBalanceFilter] = useState<'all' | 'cr' | 'dr'>('all');
+  const [sortField, setSortField] = useState<'name' | 'balance' | null>(null);
+  const [sortAsc, setSortAsc] = useState<boolean>(true);
+
+  // Timestamp tracking
+  const [lastUpdated, setLastUpdated] = useState<string>('');
+
   // Password change modal state
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -52,18 +76,179 @@ const Dashboard: React.FC = () => {
   // React Query hooks for data fetching
   const { data: stats, isLoading: statsLoading, isFetching: statsFetching } = useDashboardStats(selectedDate);
   const { data: companyBalances, isLoading: companyLoading, isFetching: companyFetching } = useCompanyBalances();
-  const { companies, accounts, subAccounts, users, pendingApprovals, uniqueSubAccountsCount, distinctMainAccountsCount, distinctCompaniesCount, activeOperatorCount, isLoading: dropdownLoading } = useDropdownData();
-  const { invalidateAll, invalidateStats, invalidateRecentEntries } = useInvalidateDashboard();
+
+  // Process company balances for search, filter (All / CR / DR), and sorting
+  const processedCompanyBalances = React.useMemo(() => {
+    if (!companyBalances) return [];
+
+    let result = [...companyBalances];
+
+    // 1. Search filter
+    if (companySearch) {
+      const searchLower = companySearch.toLowerCase().trim();
+      result = result.filter(c => c.companyName.toLowerCase().includes(searchLower));
+    }
+
+    // 2. CR / DR filter
+    if (balanceFilter === 'cr') {
+      result = result.filter(c => c.closingBalance >= 0);
+    } else if (balanceFilter === 'dr') {
+      result = result.filter(c => c.closingBalance < 0);
+    }
+
+    // 3. Sorting
+    if (sortField === 'name') {
+      result.sort((a, b) => {
+        const comp = a.companyName.localeCompare(b.companyName);
+        return sortAsc ? comp : -comp;
+      });
+    } else if (sortField === 'balance') {
+      result.sort((a, b) => {
+        return sortAsc ? a.closingBalance - b.closingBalance : b.closingBalance - a.closingBalance;
+      });
+    }
+
+    return result;
+  }, [companyBalances, companySearch, balanceFilter, sortField, sortAsc]);
+  const { companies, pendingApprovals, uniqueSubAccountsCount, distinctMainAccountsCount, distinctCompaniesCount, activeOperatorCount, isLoading: dropdownLoading } = useDropdownData();
+  const { invalidateAll } = useInvalidateDashboard();
 
   // Combined loading states
   const loading = statsLoading || companyLoading || dropdownLoading;
   const autoUpdating = statsFetching || companyFetching;
+
+  // Helper to format currency in Indian style
+  const formatIndianNumber = (num: number | undefined | null) => {
+    if (num === undefined || num === null || isNaN(num)) return '0';
+    return num.toLocaleString('en-IN');
+  };
+
+  const fetchTodaySummary = async () => {
+    setTodayLoading(true);
+    try {
+      const todayDateStr = format(new Date(), 'yyyy-MM-dd');
+      const { data, error } = await supabase
+        .from(getTableName('cash_book'))
+        .select('credit, debit, approved')
+        .eq('c_date', todayDateStr);
+
+      if (error) throw error;
+
+      if (data) {
+        const entries = data.length;
+        const credit = data.reduce((sum, entry) => sum + (parseFloat(entry.credit) || 0), 0);
+        const debit = data.reduce((sum, entry) => sum + (parseFloat(entry.debit) || 0), 0);
+        const pending = data.filter(entry => !entry.approved).length;
+
+        setTodaySummary({ entries, credit, debit, pending });
+      }
+    } catch (error) {
+      console.error('Error fetching today summary:', error);
+    } finally {
+      setTodayLoading(false);
+    }
+  };
+
+  const checkExpiries = async () => {
+    try {
+      const today = new Date();
+      
+      // Check Vehicles
+      const vehiclesData = await supabaseDB.getVehicles();
+      let expiredVCount = 0;
+      let expiringVCount = 0;
+      vehiclesData.forEach(vehicle => {
+        const dates = [
+          vehicle.tax_exp_date,
+          vehicle.insurance_exp_date,
+          vehicle.fitness_exp_date,
+          vehicle.permit_exp_date,
+        ];
+        
+        let hasExpired = false;
+        let hasExpiring = false;
+        
+        dates.forEach(dStr => {
+          if (dStr) {
+            const expiry = new Date(dStr);
+            const diffDays = differenceInDays(expiry, today);
+            if (diffDays < 0) {
+              hasExpired = true;
+            } else if (diffDays <= 30) {
+              hasExpiring = true;
+            }
+          }
+        });
+        
+        if (hasExpired) {
+          expiredVCount++;
+        } else if (hasExpiring) {
+          expiringVCount++;
+        }
+      });
+      
+      setVehicleStats(expiredVCount > 0 || expiringVCount > 0 ? { expired: expiredVCount, expiring: expiringVCount } : null);
+      
+      // Check Bank Guarantees
+      const bgData = await supabaseDB.getBankGuarantees();
+      let expiredBGCount = 0;
+      let expiringBGCount = 0;
+      bgData.forEach(bg => {
+        if (!bg.cancelled && bg.exp_date) {
+          const expiry = new Date(bg.exp_date);
+          const diffDays = differenceInDays(expiry, today);
+          if (diffDays < 0) {
+            expiredBGCount++;
+          } else if (diffDays <= 30) {
+            expiringBGCount++;
+          }
+        }
+      });
+      
+      setBgStats(expiredBGCount > 0 || expiringBGCount > 0 ? { expired: expiredBGCount, expiring: expiringBGCount } : null);
+
+      // Check Drivers
+      const driversData = await supabaseDB.getDrivers();
+      let expiredDCount = 0;
+      let expiringDCount = 0;
+      driversData.forEach(driver => {
+        if (driver.exp_date) {
+          const expiry = new Date(driver.exp_date);
+          const diffDays = differenceInDays(expiry, today);
+          if (diffDays < 0) {
+            expiredDCount++;
+          } else if (diffDays <= 30) {
+            expiringDCount++;
+          }
+        }
+      });
+      
+      setDriverStats(expiredDCount > 0 || expiringDCount > 0 ? { expired: expiredDCount, expiring: expiringDCount } : null);
+    } catch (error) {
+      console.error('Error checking expiries on dashboard:', error);
+    }
+  };
+
+  // Run initial checks on mount and mode/selected date change
+  useEffect(() => {
+    fetchTodaySummary();
+    checkExpiries();
+  }, [tableMode, selectedDate]);
+
+  // Sync lastUpdated time when fetches complete
+  useEffect(() => {
+    if (!loading && !autoUpdating) {
+      setLastUpdated(format(new Date(), 'hh:mm:ss a'));
+    }
+  }, [loading, autoUpdating]);
 
   // Listen for storage events to refresh when new entries are created
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'dashboard-refresh' && e.newValue) {
         invalidateAll();
+        fetchTodaySummary();
+        checkExpiries();
         // Clear the trigger
         localStorage.removeItem('dashboard-refresh');
       }
@@ -79,6 +264,8 @@ const Dashboard: React.FC = () => {
     const refreshTrigger = localStorage.getItem('dashboard-refresh');
     if (refreshTrigger) {
       invalidateAll();
+      fetchTodaySummary();
+      checkExpiries();
       localStorage.removeItem('dashboard-refresh');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,22 +287,22 @@ const Dashboard: React.FC = () => {
       } catch (error: any) {
         // Silently handle errors (table might not exist - that's okay)
         // Only log if it's not a table not found error
-        const isTableNotFound = 
-          error?.code === '42P01' || 
+        const isTableNotFound =
+          error?.code === '42P01' ||
           error?.message?.includes('does not exist') ||
           error?.message?.includes('not found') ||
           error?.status === 404;
-        
+
         if (!isTableNotFound) {
           console.log('Could not load credentials from database, using localStorage:', error);
         }
       }
-      
+
       // Fallback to localStorage if database fetch fails or returns empty
       const credentials = JSON.parse(localStorage.getItem('user_credentials') || '[]');
       setUserCredentials(credentials.reverse()); // Show newest first
     };
-    
+
     loadCredentials();
   }, []); // Only run on mount
 
@@ -129,6 +316,8 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     const handleDashboardRefresh = async () => {
       invalidateAll();
+      fetchTodaySummary();
+      checkExpiries();
       // Also reload credentials when dashboard refreshes - from database first
       // This will silently return empty array if table doesn't exist (404 errors handled in supabaseDatabase)
       try {
@@ -142,17 +331,17 @@ const Dashboard: React.FC = () => {
       } catch (error: any) {
         // Silently handle errors (table might not exist - that's okay)
         // Only log if it's not a table not found error
-        const isTableNotFound = 
-          error?.code === '42P01' || 
+        const isTableNotFound =
+          error?.code === '42P01' ||
           error?.message?.includes('does not exist') ||
           error?.message?.includes('not found') ||
           error?.status === 404;
-        
+
         if (!isTableNotFound) {
           console.log('Could not load credentials from database, using localStorage:', error);
         }
       }
-      
+
       // Fallback to localStorage
       const credentials = JSON.parse(localStorage.getItem('user_credentials') || '[]');
       setUserCredentials(credentials.reverse()); // Show newest first
@@ -162,7 +351,7 @@ const Dashboard: React.FC = () => {
     return () => window.removeEventListener('dashboard-refresh', handleDashboardRefresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array - event listener doesn't need dependencies
-  
+
   // Copy credentials to clipboard
   const copyCredentials = (username: string, password: string) => {
     const text = `Username: ${username}\nPassword: ${password}`;
@@ -172,7 +361,7 @@ const Dashboard: React.FC = () => {
       toast.error('Failed to copy credentials');
     });
   };
-  
+
   // Remove credentials from display
   const removeCredentials = (index: number) => {
     const updated = [...userCredentials];
@@ -180,7 +369,7 @@ const Dashboard: React.FC = () => {
     setUserCredentials(updated);
     localStorage.setItem('user_credentials', JSON.stringify(updated.reverse()));
   };
-  
+
   // Feature names mapping
   const featureNames: { [key: string]: string } = {
     dashboard: 'Dashboard',
@@ -204,9 +393,9 @@ const Dashboard: React.FC = () => {
   // Set up Supabase real-time subscription for automatic updates
   useEffect(() => {
     console.log('🔄 Setting up Supabase real-time subscription for dashboard...');
-    
+
     let isMounted = true;
-    
+
     const subscription = supabase
       .channel('cash_book_changes')
       .on(
@@ -230,6 +419,8 @@ const Dashboard: React.FC = () => {
           });
           // Invalidate React Query cache to trigger refetch
           invalidateAll();
+          fetchTodaySummary();
+          checkExpiries();
         }
       )
       .subscribe();
@@ -245,6 +436,8 @@ const Dashboard: React.FC = () => {
   // Manual refresh function
   const handleManualRefresh = () => {
     invalidateAll();
+    fetchTodaySummary();
+    checkExpiries();
     toast.success('Dashboard refreshed!', {
       duration: 2000,
       position: 'top-right',
@@ -286,17 +479,7 @@ const Dashboard: React.FC = () => {
     setChangingPassword(false);
   };
 
-  const getTransactionColor = (credit: number, debit: number) => {
-    if (credit > 0) return 'text-green-600';
-    if (debit > 0) return 'text-red-600';
-    return 'text-gray-600';
-  };
 
-  const getTransactionBg = (credit: number, debit: number) => {
-    if (credit > 0) return 'bg-green-50 border-green-200';
-    if (debit > 0) return 'bg-red-50 border-red-200';
-    return 'bg-gray-50 border-gray-200';
-  };
 
   const dateOptions = [
     { value: format(new Date(), 'yyyy-MM-dd'), label: 'Today' },
@@ -336,14 +519,15 @@ const Dashboard: React.FC = () => {
         </div>
 
         <div className='flex items-center gap-4'>
-          <button
-            onClick={handleManualRefresh}
-            disabled={loading || autoUpdating}
-            className='flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
-          >
-            <RefreshCw className={`w-4 h-4 ${(loading || autoUpdating) ? 'animate-spin' : ''}`} />
-            {loading ? 'Refreshing...' : autoUpdating ? 'Auto-updating...' : 'Refresh'}
-          </button>
+          {lastUpdated && (
+            <div className='flex items-center gap-2 bg-gray-50 border border-gray-200 px-3 py-1.5 rounded-lg text-xs text-gray-500 no-print'>
+              <span className='relative flex h-2 w-2'>
+                <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75'></span>
+                <span className='relative inline-flex rounded-full h-2 w-2 bg-green-500'></span>
+              </span>
+              <span>Last updated: {lastUpdated}</span>
+            </div>
+          )}
           {autoUpdating && !loading && (
             <div className='flex items-center gap-2 text-sm text-green-600'>
               <div className='w-2 h-2 bg-green-600 rounded-full animate-pulse'></div>
@@ -356,6 +540,14 @@ const Dashboard: React.FC = () => {
               Processing all transactions...
             </div>
           )}
+          <button
+            onClick={handleManualRefresh}
+            disabled={loading || autoUpdating}
+            className='flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+          >
+            <RefreshCw className={`w-4 h-4 ${(loading || autoUpdating) ? 'animate-spin' : ''}`} />
+            {loading ? 'Refreshing...' : autoUpdating ? 'Auto-updating...' : 'Refresh'}
+          </button>
           <Select
             value={selectedDate}
             onChange={setSelectedDate}
@@ -365,96 +557,189 @@ const Dashboard: React.FC = () => {
         </div>
       </div>
 
+      {/* Expiry Alerts Strip */}
+      {(vehicleStats || bgStats || driverStats) && (
+        <div className='bg-red-50 border border-red-200 rounded-lg p-3 flex flex-wrap gap-4 text-xs font-semibold text-red-800 items-center no-print'>
+          <AlertTriangle className='w-4 h-4 text-red-600 shrink-0' />
+          <span>Active Expiry Alerts:</span>
+          {vehicleStats && (
+            <button
+              onClick={() => navigate('/vehicles')}
+              className='bg-white px-2 py-1 rounded border border-red-200 hover:bg-red-100 transition-colors flex items-center gap-1 cursor-pointer'
+            >
+              <span>Vehicles:</span>
+              <span className='font-bold text-red-600'>{vehicleStats.expired} expired</span>
+              <span>/</span>
+              <span className='text-orange-600'>{vehicleStats.expiring} expiring</span>
+            </button>
+          )}
+          {bgStats && (
+            <button
+              onClick={() => navigate('/bank-guarantees')}
+              className='bg-white px-2 py-1 rounded border border-red-200 hover:bg-red-100 transition-colors flex items-center gap-1 cursor-pointer'
+            >
+              <span>Bank Guarantees:</span>
+              <span className='font-bold text-red-600'>{bgStats.expired} expired</span>
+              <span>/</span>
+              <span className='text-orange-600'>{bgStats.expiring} expiring</span>
+            </button>
+          )}
+          {driverStats && (
+            <button
+              onClick={() => navigate('/drivers')}
+              className='bg-white px-2 py-1 rounded border border-red-200 hover:bg-red-100 transition-colors flex items-center gap-1 cursor-pointer'
+            >
+              <span>Drivers:</span>
+              <span className='font-bold text-red-600'>{driverStats.expired} expired</span>
+              <span>/</span>
+              <span className='text-orange-600'>{driverStats.expiring} expiring</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Stats Cards */}
-      <div className='grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3'>
-        <Card className='bg-gradient-to-r from-green-500 to-green-600 text-white p-3'>
+      <div className='grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3'>
+        <Card 
+          onClick={() => navigate('/detailed-ledger')}
+          className='bg-gradient-to-br from-green-50 to-emerald-50 text-green-950 p-3 border border-green-200 cursor-pointer hover:shadow-md transition-shadow duration-200'
+        >
           <div className='flex items-center justify-between'>
             <div>
-              <p className='text-green-100 text-xs font-medium'>Total Credit</p>
-              <p className='text-lg font-bold'>
+              <p className='text-green-700 text-xs font-semibold uppercase tracking-wider'>Total Credit</p>
+              <p className='text-lg font-bold mt-1 text-green-900'>
                 {statsLoading ? (
-                  <div className='animate-pulse'>Loading...</div>
+                  <span className='text-gray-400 animate-pulse'>Loading...</span>
                 ) : stats?.totalCredit !== undefined ? (
-                  `${stats.totalCredit.toLocaleString()}`
+                  `${formatIndianNumber(stats.totalCredit)} CR`
                 ) : (
-                  <span className='text-yellow-200'>Error loading</span>
+                  <span className='text-red-500'>Error loading</span>
                 )}
               </p>
             </div>
-            <TrendingUp className='w-5 h-5 text-green-200' />
+            <TrendingUp className='w-5 h-5 text-green-600 shrink-0' />
           </div>
         </Card>
 
-        <Card className='bg-gradient-to-r from-red-500 to-red-600 text-white p-3'>
+        <Card 
+          onClick={() => navigate('/detailed-ledger')}
+          className='bg-gradient-to-br from-red-50 to-rose-50 text-red-950 p-3 border border-red-200 cursor-pointer hover:shadow-md transition-shadow duration-200'
+        >
           <div className='flex items-center justify-between'>
             <div>
-              <p className='text-red-100 text-xs font-medium'>Total Debit</p>
-              <p className='text-lg font-bold'>
+              <p className='text-red-700 text-xs font-semibold uppercase tracking-wider'>Total Debit</p>
+              <p className='text-lg font-bold mt-1 text-red-900'>
                 {statsLoading ? (
-                  <div className='animate-pulse'>Loading...</div>
+                  <span className='text-gray-400 animate-pulse'>Loading...</span>
                 ) : stats?.totalDebit !== undefined ? (
-                  `${stats.totalDebit.toLocaleString()}`
+                  `${formatIndianNumber(stats.totalDebit)} DR`
                 ) : (
-                  <span className='text-yellow-200'>Error loading</span>
+                  <span className='text-red-500'>Error loading</span>
                 )}
               </p>
             </div>
-            <TrendingDown className='w-5 h-5 text-red-200' />
+            <TrendingDown className='w-5 h-5 text-red-600 shrink-0' />
           </div>
         </Card>
 
-        <Card className='bg-gradient-to-r from-blue-500 to-blue-600 text-white p-3'>
+        <Card 
+          onClick={() => navigate('/detailed-ledger')}
+          className='bg-gradient-to-br from-blue-50 to-sky-50 text-blue-950 p-3 border border-blue-200 cursor-pointer hover:shadow-md transition-shadow duration-200'
+        >
           <div className='flex items-center justify-between'>
             <div>
-              <p className='text-blue-100 text-xs font-medium'>Net Balance</p>
-              <p className='text-lg font-bold'>
+              <p className='text-blue-700 text-xs font-semibold uppercase tracking-wider'>Net Balance</p>
+              <p className='text-lg font-bold mt-1 text-blue-900'>
                 {statsLoading ? (
-                  <div className='animate-pulse'>Loading...</div>
+                  <span className='text-gray-400 animate-pulse'>Loading...</span>
                 ) : stats?.balance !== undefined ? (
-                  `${stats.balance.toLocaleString()}`
+                  stats.balance >= 0 
+                    ? `${formatIndianNumber(stats.balance)} CR`
+                    : `${formatIndianNumber(Math.abs(stats.balance))} DR`
                 ) : (
-                  <span className='text-yellow-200'>Error loading</span>
+                  <span className='text-red-500'>Error loading</span>
                 )}
               </p>
             </div>
-            <DollarSign className='w-5 h-5 text-blue-200' />
+            <DollarSign className='w-5 h-5 text-blue-600 shrink-0' />
           </div>
         </Card>
 
-        <Card className='bg-gradient-to-r from-purple-500 to-purple-600 text-white p-3'>
+        <Card 
+          onClick={() => navigate('/daily-report')}
+          className='bg-gradient-to-br from-purple-50 to-indigo-50 text-purple-950 p-3 border border-purple-200 cursor-pointer hover:shadow-md transition-shadow duration-200'
+        >
           <div className='flex items-center justify-between'>
             <div>
-              <p className='text-purple-100 text-xs font-medium'>
-                Transactions
-              </p>
-              <p className='text-lg font-bold'>
+              <p className='text-purple-700 text-xs font-semibold uppercase tracking-wider'>Transactions</p>
+              <p className='text-lg font-bold mt-1 text-purple-900'>
                 {statsLoading ? (
-                  <div className='animate-pulse'>Loading...</div>
+                  <span className='text-gray-400 animate-pulse'>Loading...</span>
                 ) : stats?.totalTransactions !== undefined ? (
-                  stats.totalTransactions.toLocaleString()
+                  formatIndianNumber(stats.totalTransactions)
                 ) : (
-                  <span className='text-yellow-200'>Error loading</span>
+                  <span className='text-red-500'>Error loading</span>
                 )}
               </p>
             </div>
-            <FileText className='w-5 h-5 text-purple-200' />
+            <FileText className='w-5 h-5 text-purple-600 shrink-0' />
           </div>
         </Card>
 
-        <Card className='bg-gradient-to-r from-orange-500 to-orange-600 text-white p-3'>
+        <Card 
+          onClick={() => navigate('/approve-records')}
+          className='bg-gradient-to-br from-orange-50 to-amber-50 text-orange-950 p-3 border border-orange-200 cursor-pointer hover:shadow-md transition-shadow duration-200'
+        >
           <div className='flex items-center justify-between'>
             <div>
-              <p className='text-orange-100 text-xs font-medium'>Pending</p>
-              <p className='text-lg font-bold'>{pendingApprovals?.data || 0}</p>
+              <p className='text-orange-700 text-xs font-semibold uppercase tracking-wider'>Pending</p>
+              <p className='text-lg font-bold mt-1 text-orange-900'>
+                {pendingApprovals?.data !== undefined ? (
+                  formatIndianNumber(pendingApprovals.data)
+                ) : (
+                  '0'
+                )}
+              </p>
             </div>
-            <AlertTriangle className='w-5 h-5 text-orange-200' />
+            <AlertTriangle className='w-5 h-5 text-orange-600 shrink-0' />
           </div>
         </Card>
-
       </div>
 
-      {/* Online vs Offline Transaction Stats */}
-      {/* Removed online and offline transaction cards */}
+      {/* Today's Summary Card */}
+      <Card
+        title="Today's Summary"
+        subtitle={`Real-time overview for today (${format(new Date(), 'dd/MM/yyyy')})`}
+        className="bg-gradient-to-br from-slate-50 to-zinc-50 border-slate-200"
+      >
+        {todayLoading ? (
+          <div className='text-center py-4 text-gray-500'>
+            <div className='animate-spin rounded-full h-5 w-5 border-b-2 border-slate-600 mx-auto'></div>
+            <p className='mt-2 text-xs'>Loading today's summary...</p>
+          </div>
+        ) : todaySummary ? (
+          <div className='grid grid-cols-2 md:grid-cols-4 gap-4'>
+            <div className='bg-white p-3 rounded-lg border border-slate-200 shadow-sm'>
+              <div className='text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1'>Today's Entries</div>
+              <div className='text-base font-bold text-slate-800'>{todaySummary.entries}</div>
+            </div>
+            <div className='bg-white p-3 rounded-lg border border-slate-200 shadow-sm'>
+              <div className='text-[10px] font-semibold text-green-600 uppercase tracking-wider mb-1'>Today's Credit</div>
+              <div className='text-base font-bold text-green-700'>{formatIndianNumber(todaySummary.credit)} CR</div>
+            </div>
+            <div className='bg-white p-3 rounded-lg border border-slate-200 shadow-sm'>
+              <div className='text-[10px] font-semibold text-red-600 uppercase tracking-wider mb-1'>Today's Debit</div>
+              <div className='text-base font-bold text-red-700'>{formatIndianNumber(todaySummary.debit)} DR</div>
+            </div>
+            <div className='bg-white p-3 rounded-lg border border-slate-200 shadow-sm'>
+              <div className='text-[10px] font-semibold text-orange-600 uppercase tracking-wider mb-1'>Today's Pending</div>
+              <div className='text-base font-bold text-orange-700'>{todaySummary.pending}</div>
+            </div>
+          </div>
+        ) : (
+          <div className='text-center py-2 text-gray-500 text-xs'>No statistics recorded today.</div>
+        )}
+      </Card>
 
       {/* User Login Credentials Section - Only show for Admin */}
       {user?.is_admin && userCredentials.length > 0 && showCredentials && (
@@ -472,7 +757,7 @@ const Dashboard: React.FC = () => {
               <X className='w-5 h-5' />
             </button>
           </div>
-          
+
           <div className='space-y-3'>
             {userCredentials.map((cred, index) => (
               <div
@@ -493,14 +778,14 @@ const Dashboard: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    
+
                     <div className='flex items-center gap-2 mb-3'>
                       <span className='font-semibold text-gray-900'>Password:</span>
                       <code className='bg-red-50 text-red-700 px-2 py-1 rounded text-sm font-mono'>
                         {cred.password}
                       </code>
                     </div>
-                    
+
                     <div className='mb-2'>
                       <span className='text-sm font-semibold text-gray-700'>Access Features: </span>
                       {cred.is_admin ? (
@@ -520,14 +805,14 @@ const Dashboard: React.FC = () => {
                         <span className='text-sm text-gray-500'>None (Dashboard only)</span>
                       )}
                     </div>
-                    
+
                     {cred.created_at && (
                       <p className='text-xs text-gray-500 mt-2'>
                         Created: {format(new Date(cred.created_at), 'MMM dd, yyyy HH:mm')}
                       </p>
                     )}
                   </div>
-                  
+
                   <div className='flex flex-col gap-2'>
                     <button
                       onClick={() => copyCredentials(cred.username, cred.password)}
@@ -550,16 +835,16 @@ const Dashboard: React.FC = () => {
               </div>
             ))}
           </div>
-          
+
           <div className='mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg'>
             <p className='text-sm text-yellow-800'>
-              <strong>Note:</strong> These credentials are stored locally in your browser. Share them securely with the team member. 
+              <strong>Note:</strong> These credentials are stored locally in your browser. Share them securely with the team member.
               They can use these credentials to login to the system.
             </p>
           </div>
         </Card>
       )}
-      
+
       {/* Show button to display credentials if hidden */}
       {user?.is_admin && userCredentials.length > 0 && !showCredentials && (
         <Card className='bg-blue-50 border border-blue-200'>
@@ -567,7 +852,7 @@ const Dashboard: React.FC = () => {
             <div className='flex items-center gap-2'>
               <Key className='w-5 h-5 text-blue-600' />
               <p className='text-gray-700'>
-                You have {userCredentials.length} created user credential(s). 
+                You have {userCredentials.length} created user credential(s).
               </p>
             </div>
             <button
@@ -582,7 +867,10 @@ const Dashboard: React.FC = () => {
 
       {/* Quick Stats */}
       <div className='grid grid-cols-2 md:grid-cols-4 gap-3'>
-        <Card className='bg-gradient-to-br from-indigo-50 to-blue-50 border-indigo-200 p-3'>
+        <Card 
+          onClick={() => navigate('/ledger-summary')}
+          className='bg-gradient-to-br from-indigo-50 to-blue-50 border-indigo-200 p-3 hover:shadow-md cursor-pointer transition-shadow'
+        >
           <div className='flex items-center gap-2'>
             <Building className='w-5 h-5 text-indigo-600' />
             <div>
@@ -618,7 +906,10 @@ const Dashboard: React.FC = () => {
           </div>
         </Card>
 
-        <Card className='bg-gradient-to-br from-amber-50 to-yellow-50 border-amber-200 p-3'>
+        <Card 
+          onClick={() => navigate('/user-management')}
+          className='bg-gradient-to-br from-amber-50 to-yellow-50 border-amber-200 p-3 hover:shadow-md cursor-pointer transition-shadow'
+        >
           <div className='flex items-center gap-2'>
             <Users className='w-5 h-5 text-amber-600' />
             <div>
@@ -646,85 +937,181 @@ const Dashboard: React.FC = () => {
             No company data found.
           </div>
         ) : (
-          <div className='overflow-x-auto'>
-            <table className='w-full text-xs'>
-                <thead className='sticky top-0 bg-gray-50 z-10'>
-                  <tr className='border-b border-gray-200'>
-                    <th className='text-left py-3 px-4 font-semibold text-gray-700'>
-                      Company Name
-                    </th>
-                    <th className='text-right py-3 px-4 font-semibold text-gray-700'>
-                      Total Credit
-                    </th>
-                    <th className='text-right py-3 px-4 font-semibold text-gray-700'>
-                      Total Debit
-                    </th>
-                    <th className='text-right py-3 px-4 font-semibold text-gray-700'>
-                      Closing Balance
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                {companyBalances?.map((company, index) => (
-                  <tr
-                    key={company.companyName}
-                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${
-                      index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
-                    }`}
+          <div className='flex flex-col space-y-4'>
+            {/* Filter and Search Toolbar */}
+            <div className='flex flex-col sm:flex-row gap-4 justify-between items-center bg-gray-50 p-3 rounded-lg border border-gray-200'>
+              {/* Filter Buttons */}
+              <div className='flex gap-1 items-center w-full sm:w-auto'>
+                <span className='text-xs font-semibold text-gray-500 mr-2'>Filter:</span>
+                <button
+                  type='button'
+                  onClick={() => setBalanceFilter('all')}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+                    balanceFilter === 'all'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type='button'
+                  onClick={() => setBalanceFilter('cr')}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+                    balanceFilter === 'cr'
+                      ? 'bg-green-600 text-white shadow-sm'
+                      : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
+                  }`}
+                >
+                  CR (Credit)
+                </button>
+                <button
+                  type='button'
+                  onClick={() => setBalanceFilter('dr')}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+                    balanceFilter === 'dr'
+                      ? 'bg-red-600 text-white shadow-sm'
+                      : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
+                  }`}
+                >
+                  DR (Debit)
+                </button>
+              </div>
+
+              {/* Search Box */}
+              <div className='relative w-full sm:w-64'>
+                <input
+                  type='text'
+                  placeholder='Search company name...'
+                  value={companySearch}
+                  onChange={(e) => setCompanySearch(e.target.value)}
+                  className='w-full px-3 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500'
+                />
+                {companySearch && (
+                  <button
+                    type='button'
+                    onClick={() => setCompanySearch('')}
+                    className='absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold'
                   >
-                    <td className='py-3 px-4 font-medium text-gray-900'>
-                      {company.companyName}
-                    </td>
-                    <td className='py-3 px-4 text-right text-green-600 font-medium'>
-{company.totalCredit.toLocaleString()}
-                    </td>
-                    <td className='py-3 px-4 text-right text-red-600 font-medium'>
-{company.totalDebit.toLocaleString()}
-                    </td>
-                    <td className='py-3 px-4 text-right font-semibold'>
-                      <span
-                        className={`px-2 py-1 rounded-full text-sm ${
-                          company.closingBalance > 0
-                            ? 'bg-green-100 text-green-800'
-                            : company.closingBalance < 0
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}
-                      >
-{company.closingBalance.toLocaleString()}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                </tbody>
-              </table>
-            {/* Summary Footer */}
-            <div className='mt-4 p-4 bg-gray-100 rounded-lg border'>
-              <div className='grid grid-cols-4 gap-4 text-sm'>
-                <div className='font-semibold text-gray-900'>
-                  Total Companies: {companyBalances?.length || 0}
-                </div>
-                <div className='text-right text-green-600 font-semibold'>
-{companyBalances?.reduce((sum, c) => sum + c.totalCredit, 0)?.toLocaleString() || '0'}
-                </div>
-                <div className='text-right text-red-600 font-semibold'>
-{companyBalances?.reduce((sum, c) => sum + c.totalDebit, 0)?.toLocaleString() || '0'}
-                </div>
-                <div className='text-right'>
-                  <span
-                    className={`px-2 py-1 rounded-full text-sm font-bold ${
-                      (companyBalances?.reduce((sum, c) => sum + c.closingBalance, 0) || 0) > 0
-                        ? 'bg-green-100 text-green-800'
-                        : (companyBalances?.reduce((sum, c) => sum + c.closingBalance, 0) || 0) < 0
-                        ? 'bg-red-100 text-red-800'
-                        : 'bg-gray-100 text-gray-800'
-                    }`}
-                  >
-{companyBalances?.reduce((sum, c) => sum + c.closingBalance, 0)?.toLocaleString() || '0'}
-                  </span>
-                </div>
+                    ×
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Table */}
+            {processedCompanyBalances.length === 0 ? (
+              <div className='text-center py-6 text-gray-500 bg-white border rounded-lg'>
+                No companies match the selected search or filters.
+              </div>
+            ) : (
+              <div className='overflow-x-auto'>
+                <table className='w-full text-xs'>
+                  <thead className='sticky top-0 bg-gray-50 z-10'>
+                    <tr className='border-b border-gray-200 select-none'>
+                      <th 
+                        onClick={() => {
+                          if (sortField === 'name') {
+                            setSortAsc(!sortAsc);
+                          } else {
+                            setSortField('name');
+                            setSortAsc(true);
+                          }
+                        }}
+                        className='text-left py-3 px-4 font-semibold text-gray-700 cursor-pointer hover:bg-gray-100 transition-colors'
+                      >
+                        Company Name {sortField === 'name' ? (sortAsc ? ' ↑' : ' ↓') : ''}
+                      </th>
+                      <th className='text-right py-3 px-4 font-semibold text-gray-700'>
+                        Total Credit
+                      </th>
+                      <th className='text-right py-3 px-4 font-semibold text-gray-700'>
+                        Total Debit
+                      </th>
+                      <th 
+                        onClick={() => {
+                          if (sortField === 'balance') {
+                            setSortAsc(!sortAsc);
+                          } else {
+                            setSortField('balance');
+                            setSortAsc(false); // Default to high-to-low sort for balances
+                          }
+                        }}
+                        className='text-right py-3 px-4 font-semibold text-gray-700 cursor-pointer hover:bg-gray-100 transition-colors'
+                      >
+                        Closing Balance {sortField === 'balance' ? (sortAsc ? ' ↑' : ' ↓') : ''}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {processedCompanyBalances.map((company, index) => (
+                      <tr
+                        key={company.companyName}
+                        className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${
+                          index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                        }`}
+                      >
+                        <td className='py-3 px-4 font-medium text-gray-900'>
+                          {company.companyName}
+                        </td>
+                        <td className='py-3 px-4 text-right text-green-600 font-medium'>
+                          {formatIndianNumber(company.totalCredit)}
+                        </td>
+                        <td className='py-3 px-4 text-right text-red-600 font-medium'>
+                          {formatIndianNumber(company.totalDebit)}
+                        </td>
+                        <td className='py-3 px-4 text-right font-semibold'>
+                          <span
+                            className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                              company.closingBalance >= 0
+                                ? 'bg-green-50 text-green-700 border border-green-200'
+                                : 'bg-red-50 text-red-700 border border-red-200'
+                            }`}
+                          >
+                            {company.closingBalance >= 0
+                              ? `${formatIndianNumber(company.closingBalance)} CR`
+                              : `${formatIndianNumber(Math.abs(company.closingBalance))} DR`}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                {/* Summary Footer */}
+                <div className='mt-4 p-4 bg-gray-100 rounded-lg border'>
+                  <div className='grid grid-cols-4 gap-4 text-sm'>
+                    <div className='font-semibold text-gray-900'>
+                      Total Companies: {processedCompanyBalances.length}
+                    </div>
+                    <div className='text-right text-green-600 font-semibold'>
+                      {formatIndianNumber(processedCompanyBalances.reduce((sum, c) => sum + c.totalCredit, 0))}
+                    </div>
+                    <div className='text-right text-red-600 font-semibold'>
+                      {formatIndianNumber(processedCompanyBalances.reduce((sum, c) => sum + c.totalDebit, 0))}
+                    </div>
+                    <div className='text-right'>
+                      {(() => {
+                        const totalBal = processedCompanyBalances.reduce((sum, c) => sum + c.closingBalance, 0);
+                        return (
+                          <span
+                            className={`px-2 py-1 rounded-full text-sm font-bold ${
+                              totalBal >= 0
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-red-100 text-red-800'
+                            }`}
+                          >
+                            {totalBal >= 0
+                              ? `${formatIndianNumber(totalBal)} CR`
+                              : `${formatIndianNumber(Math.abs(totalBal))} DR`}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>

@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
-import Select from '../components/UI/Select';
+import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB, BalanceSheetAccount } from '../lib/supabaseDatabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import { format, parseISO } from 'date-fns';
+import CustomCalendar from '../components/UI/CustomCalendar';
+import { Calendar } from 'lucide-react';
 
 interface BalanceSheetFilters {
   companyName: string;
@@ -23,6 +25,7 @@ interface BalanceSheetFilters {
 
 const BalanceSheet: React.FC = () => {
   const { user } = useAuth();
+  const { mode: tableMode } = useTableMode();
 
   const [filters, setFilters] = useState<BalanceSheetFilters>({
     companyName: '',
@@ -39,6 +42,28 @@ const BalanceSheet: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [showFinalReport, setShowFinalReport] = useState(false);
   const [usingOptimizedAPI, setUsingOptimizedAPI] = useState(true);
+  
+  const [showFromCalendar, setShowFromCalendar] = useState(false);
+  const [showToCalendar, setShowToCalendar] = useState(false);
+  const [fromDateInput, setFromDateInput] = useState('');
+  const [toDateInput, setToDateInput] = useState('');
+
+  // Sync formatted text inputs with filter date values
+  useEffect(() => {
+    try {
+      setFromDateInput(filters.fromDate ? format(new Date(filters.fromDate), 'dd/MM/yyyy') : '');
+    } catch (e) {
+      console.error('Error formatting fromDate:', e);
+    }
+  }, [filters.fromDate]);
+
+  useEffect(() => {
+    try {
+      setToDateInput(filters.toDate ? format(new Date(filters.toDate), 'dd/MM/yyyy') : '');
+    } catch (e) {
+      console.error('Error formatting toDate:', e);
+    }
+  }, [filters.toDate]);
   
   // State for P&L selection and custom content
   const [selectedAccountsForPL, setSelectedAccountsForPL] = useState<Set<string>>(new Set());
@@ -76,7 +101,7 @@ const BalanceSheet: React.FC = () => {
   useEffect(() => {
     loadDropdownData();
     generateBalanceSheet();
-  }, []);
+  }, [tableMode]);
 
   useEffect(() => {
     generateBalanceSheet();
@@ -90,7 +115,7 @@ const BalanceSheet: React.FC = () => {
         value: company.company_name,
         label: company.company_name,
       }));
-      setCompanies(companiesData);
+      setCompanies([{ value: '', label: 'All Companies' }, ...companiesData]);
     } catch (error) {
       console.error('Error loading companies:', error);
       toast.error('Failed to load companies');
@@ -100,18 +125,11 @@ const BalanceSheet: React.FC = () => {
   const generateBalanceSheet = async () => {
     setLoading(true);
     try {
-      // Validate that a company is selected
-      if (!filters.companyName) {
-        toast.error('Please select a company first');
-        setLoading(false);
-        return;
-      }
-
       console.log('🚀 Generating optimized balance sheet...');
       
       // Use the new optimized API endpoint
       const result = await supabaseDB.getOptimizedBalanceSheet({
-        companyName: filters.companyName,
+        companyName: filters.companyName || undefined,
         fromDate: filters.betweenDates ? filters.fromDate : undefined,
         toDate: filters.betweenDates ? filters.toDate : undefined,
         plYesNo: filters.plYesNo || undefined,
@@ -145,12 +163,6 @@ const BalanceSheet: React.FC = () => {
   // Fallback method using the old client-side approach
   const generateBalanceSheetFallback = async () => {
     try {
-      // Validate that a company is selected
-      if (!filters.companyName) {
-        toast.error('Please select a company first');
-        return;
-      }
-
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Get filtered entries - use getAllCashBookEntries to get all 67k records
@@ -460,7 +472,7 @@ const BalanceSheet: React.FC = () => {
           <div class="header">
             <h1>Trial Balance Sheet</h1>
             <h2>Generated on ${format(new Date(), 'dd/MM/yyyy HH:mm')}</h2>
-            ${filters.companyName ? `<h3>Company: ${filters.companyName}</h3>` : ''}
+            <h3>Company: ${filters.companyName || 'All Companies'}</h3>
             <p>Period: ${format(parseISO(filters.fromDate), 'dd/MM/yyyy')} to ${format(parseISO(filters.toDate), 'dd/MM/yyyy')}</p>
           </div>
 
@@ -653,7 +665,7 @@ const BalanceSheet: React.FC = () => {
           <div class="header">
             <h1>Trial Balance Sheet & Profit & Loss Report</h1>
             <h2>Generated on ${format(new Date(), 'dd/MM/yyyy HH:mm')}</h2>
-            ${filters.companyName ? `<h3>Company: ${filters.companyName}</h3>` : ''}
+            <h3>Company: ${filters.companyName || 'All Companies'}</h3>
             <p>Period: ${format(parseISO(filters.fromDate), 'dd/MM/yyyy')} to ${format(parseISO(filters.toDate), 'dd/MM/yyyy')}</p>
           </div>
 
@@ -806,41 +818,91 @@ const BalanceSheet: React.FC = () => {
         </div>
         {/* Responsive filter bar */}
         <div className='flex flex-col md:flex-row gap-4 items-end'>
-          <div className='flex-1'>
-            <label className='block text-sm font-medium text-gray-700 mb-1'>
-              Company
-            </label>
-            <select
-              value={filters.companyName}
-              onChange={e => handleFilterChange('companyName', e.target.value)}
-              className='w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500'
-            >
-              {companies.map(c => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className='flex-1'>
+          <div className='flex-1 w-full relative'>
             <label className='block text-sm font-medium text-gray-700 mb-1'>
               From Date
             </label>
-            <Input
-              type='date'
-              value={filters.fromDate}
-              onChange={value => handleFilterChange('fromDate', value)}
-              className='w-full'
+            <input
+              type='text'
+              placeholder='DD/MM/YYYY'
+              value={fromDateInput}
+              onChange={(e) => {
+                setFromDateInput(e.target.value);
+                const match = e.target.value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+                if (match) {
+                  const isoDate = `${match[3]}-${match[2]}-${match[1]}`;
+                  handleFilterChange('fromDate', isoDate);
+                }
+              }}
+              className='w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-bold'
+              style={{ fontWeight: 'bold', fontSize: '14px' }}
             />
+            <button
+              type='button'
+              tabIndex={-1}
+              onClick={() => setShowFromCalendar(!showFromCalendar)}
+              className='absolute right-2 top-7 p-1 hover:bg-gray-100 rounded'
+            >
+              <Calendar className='w-4 h-4 text-gray-500' />
+            </button>
+            {showFromCalendar && (
+              <CustomCalendar
+                onDateSelect={(date) => {
+                  handleFilterChange('fromDate', date);
+                  setFromDateInput(format(new Date(date), 'dd/MM/yyyy'));
+                  setShowFromCalendar(false);
+                }}
+                selectedDate={filters.fromDate}
+                onClose={() => setShowFromCalendar(false)}
+              />
+            )}
           </div>
-          <div className='flex-1'>
+          <div className='flex-1 w-full relative'>
             <label className='block text-sm font-medium text-gray-700 mb-1'>
               To Date
             </label>
-            <Input
-              type='date'
-              value={filters.toDate}
-              onChange={value => handleFilterChange('toDate', value)}
+            <input
+              type='text'
+              placeholder='DD/MM/YYYY'
+              value={toDateInput}
+              onChange={(e) => {
+                setToDateInput(e.target.value);
+                const match = e.target.value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+                if (match) {
+                  const isoDate = `${match[3]}-${match[2]}-${match[1]}`;
+                  handleFilterChange('toDate', isoDate);
+                }
+              }}
+              className='w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-bold'
+              style={{ fontWeight: 'bold', fontSize: '14px' }}
+            />
+            <button
+              type='button'
+              tabIndex={-1}
+              onClick={() => setShowToCalendar(!showToCalendar)}
+              className='absolute right-2 top-7 p-1 hover:bg-gray-100 rounded'
+            >
+              <Calendar className='w-4 h-4 text-gray-500' />
+            </button>
+            {showToCalendar && (
+              <CustomCalendar
+                onDateSelect={(date) => {
+                  handleFilterChange('toDate', date);
+                  setToDateInput(format(new Date(date), 'dd/MM/yyyy'));
+                  setShowToCalendar(false);
+                }}
+                selectedDate={filters.toDate}
+                onClose={() => setShowToCalendar(false)}
+              />
+            )}
+          </div>
+          <div className='flex-1 w-full'>
+            <SearchableSelect
+              label='Company'
+              value={filters.companyName}
+              onChange={value => handleFilterChange('companyName', value)}
+              options={companies}
+              placeholder='Select company...'
               className='w-full'
             />
           </div>

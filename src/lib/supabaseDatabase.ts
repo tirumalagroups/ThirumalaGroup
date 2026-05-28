@@ -135,7 +135,7 @@ class SupabaseDatabase {
         .limit(1);
       
       // If no error, column exists
-      if (!error || !error.message?.includes('payment_mode') && !error.code === '42703') {
+      if (!error || (!error.message?.includes('payment_mode') && error.code !== '42703')) {
         console.log('✅ payment_mode column exists');
         return true;
       }
@@ -1198,7 +1198,7 @@ class SupabaseDatabase {
 
     // Filter out undefined values to allow database defaults to work
     // CRITICAL: Always include payment_mode field to ensure it's saved correctly
-    const filteredEntry = Object.fromEntries(
+    const filteredEntry: Record<string, any> = Object.fromEntries(
       Object.entries(entry).filter(([key, value]) => {
         // Always include payment_mode field if it exists in the entry object (even if null)
         if (key === 'payment_mode') {
@@ -1239,7 +1239,7 @@ class SupabaseDatabase {
     
     // First attempt: try with payment_mode if it exists
     // CRITICAL: Ensure payment_mode is always included in insertData
-    const insertData = {
+    const insertData: Record<string, any> = {
       ...filteredEntry,
       sno: nextSno,
       entry_time: new Date().toISOString(),
@@ -1309,7 +1309,8 @@ class SupabaseDatabase {
         console.warn('⚠️ Retrying without payment_mode...');
         
         // Remove payment_mode and retry
-        const { payment_mode, ...entryWithoutPaymentMode } = insertData;
+        const entryWithoutPaymentMode = { ...insertData };
+        delete (entryWithoutPaymentMode as any).payment_mode;
         const retryResult = await supabase
           .from(getTableName('cash_book'))
           .insert(entryWithoutPaymentMode)
@@ -1465,7 +1466,7 @@ class SupabaseDatabase {
       // Filter out undefined fields to respect DB defaults
       // But always include payment_mode if it exists (even if null)
       const sanitized = operations.map((op) => {
-        const base = Object.fromEntries(
+        const base: Record<string, any> = Object.fromEntries(
           Object.entries(op).filter(([key, v]) => {
             // Always include payment_mode field if it exists (even if null)
             if (key === 'payment_mode') return true;
@@ -2474,7 +2475,7 @@ class SupabaseDatabase {
           error.message?.includes('does not exist') ||
           error.message?.includes('not found') ||
           error.message?.includes('relation') ||
-          error.status === 404;
+          (error as any).status === 404;
         
         if (!isTableNotFound) {
           // Only log non-404 errors (actual problems)
@@ -2491,7 +2492,7 @@ class SupabaseDatabase {
           .from('user_credentials_log')
           .delete()
           .lt('created_at', sevenDaysAgo.toISOString());
-      } catch (cleanupError) {
+      } catch {
         // Silently ignore cleanup errors (table might not exist)
       }
 
@@ -2529,7 +2530,7 @@ class SupabaseDatabase {
           error.message?.includes('does not exist') ||
           error.message?.includes('not found') ||
           error.message?.includes('relation') ||
-          error.status === 404;
+          (error as any).status === 404;
         
         if (!isTableNotFound) {
           // Only log non-404 errors (actual problems)
@@ -4241,18 +4242,11 @@ class SupabaseDatabase {
       if (!fetchError && deletedEntry) {
         console.log('✅ Found deleted entry in deleted_cash_book:', { id: deletedEntry.id, acc_name: deletedEntry.acc_name });
 
-        // Step 2: Prepare the restored entry (remove deleted fields)
-        const restoredEntry = {
-          sno: deletedEntry.sno,
-          date: deletedEntry.date,
-          acc_name: deletedEntry.acc_name,
-          particulars: deletedEntry.particulars,
-          debit: deletedEntry.debit,
-          credit: deletedEntry.credit,
-          balance: deletedEntry.balance,
-          created_at: deletedEntry.created_at,
-          updated_at: new Date().toISOString(),
-        };
+        // Step 2: Prepare the restored entry (remove deleted specific fields)
+        const restoredEntry = { ...deletedEntry };
+        delete (restoredEntry as any).deleted_by;
+        delete (restoredEntry as any).deleted_at;
+        restoredEntry.updated_at = new Date().toISOString();
 
         console.log('📝 Restored entry data:', restoredEntry);
 
@@ -4282,7 +4276,90 @@ class SupabaseDatabase {
         }
 
         console.log('✅ Successfully removed from deleted_cash_book');
+
+        // Clean up from localStorage if present
+        try {
+          const deletedRecordsStr = localStorage.getItem('deleted_records');
+          if (deletedRecordsStr) {
+            const deletedRecords = JSON.parse(deletedRecordsStr);
+            const foundIndex = deletedRecords.findIndex((r: any) => r.id === deletedId);
+            if (foundIndex !== -1) {
+              deletedRecords.splice(foundIndex, 1);
+              localStorage.setItem('deleted_records', JSON.stringify(deletedRecords));
+              console.log('🧹 Cleaned up from localStorage during DB restore');
+            }
+          }
+        } catch (e) {
+          console.warn('⚠️ Non-fatal error cleaning up localStorage:', e);
+        }
+
         return true;
+      }
+
+      // Step 1.5: Fallback - Try to restore from localStorage if database fetch failed
+      console.log('📋 Step 1.5: Fallback - Trying localStorage...');
+      try {
+        const deletedRecordsStr = localStorage.getItem('deleted_records');
+        if (deletedRecordsStr) {
+          const deletedRecords = JSON.parse(deletedRecordsStr);
+          const foundIndex = deletedRecords.findIndex((r: any) => r.id === deletedId);
+          if (foundIndex !== -1) {
+            const recordToRestore = deletedRecords[foundIndex];
+            console.log('✅ Found record to restore in localStorage:', recordToRestore);
+
+            // Prepare record for insertion back into cash_book
+            const restoredEntry = {
+              id: recordToRestore.id,
+              sno: recordToRestore.sno,
+              c_date: recordToRestore.c_date,
+              company_name: recordToRestore.company_name,
+              acc_name: recordToRestore.acc_name,
+              sub_acc_name: recordToRestore.sub_acc_name,
+              particulars: recordToRestore.particulars,
+              credit: recordToRestore.credit,
+              debit: recordToRestore.debit,
+              staff: recordToRestore.staff,
+              users: recordToRestore.users,
+              entry_time: recordToRestore.entry_time,
+              approved: recordToRestore.approved || false,
+              created_at: recordToRestore.created_at || new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            };
+
+            console.log('📝 Inserting back into cash_book from localStorage:', restoredEntry);
+            const { error: insertError } = await supabase
+              .from(getTableName('cash_book'))
+              .insert(restoredEntry);
+
+            if (insertError) {
+              console.error('❌ Error inserting into cash_book from localStorage:', insertError);
+              // Fallback to update if insert fails due to duplicate key
+              if (insertError.code === '23505') {
+                console.log('🔄 Record might already exist, attempting update...');
+                const { error: updateError } = await supabase
+                  .from(getTableName('cash_book'))
+                  .update(restoredEntry)
+                  .eq('id', restoredEntry.id);
+                if (updateError) {
+                  console.error('❌ Error updating cash_book from localStorage:', updateError);
+                  return false;
+                }
+              } else {
+                return false;
+              }
+            }
+
+            console.log('✅ Successfully restored to cash_book from localStorage');
+
+            // Remove from localStorage
+            deletedRecords.splice(foundIndex, 1);
+            localStorage.setItem('deleted_records', JSON.stringify(deletedRecords));
+            console.log('✅ Successfully removed from localStorage. Remaining:', deletedRecords.length);
+            return true;
+          }
+        }
+      } catch (err) {
+        console.error('❌ Error in localStorage restore fallback:', err);
       }
 
       // Step 2: Fallback - try to restore from cash_book with [DELETED] prefix
@@ -4362,7 +4439,42 @@ class SupabaseDatabase {
         }
 
         console.log('✅ Successfully permanently deleted from deleted_cash_book');
+
+        // Clean up from localStorage if present
+        try {
+          const deletedRecordsStr = localStorage.getItem('deleted_records');
+          if (deletedRecordsStr) {
+            const deletedRecords = JSON.parse(deletedRecordsStr);
+            const foundIndex = deletedRecords.findIndex((r: any) => r.id === deletedId);
+            if (foundIndex !== -1) {
+              deletedRecords.splice(foundIndex, 1);
+              localStorage.setItem('deleted_records', JSON.stringify(deletedRecords));
+              console.log('🧹 Cleaned up from localStorage during DB permanent deletion');
+            }
+          }
+        } catch (e) {
+          console.warn('⚠️ Non-fatal error cleaning up localStorage:', e);
+        }
+
         return true;
+      }
+
+      // Step 1.5: Fallback - Try to delete from localStorage if database fetch failed
+      console.log('📋 Step 1.5: Fallback - Trying localStorage...');
+      try {
+        const deletedRecordsStr = localStorage.getItem('deleted_records');
+        if (deletedRecordsStr) {
+          const deletedRecords = JSON.parse(deletedRecordsStr);
+          const foundIndex = deletedRecords.findIndex((r: any) => r.id === deletedId);
+          if (foundIndex !== -1) {
+            deletedRecords.splice(foundIndex, 1);
+            localStorage.setItem('deleted_records', JSON.stringify(deletedRecords));
+            console.log('✅ Successfully permanently deleted from localStorage');
+            return true;
+          }
+        }
+      } catch (err) {
+        console.error('❌ Error in localStorage permanent deletion fallback:', err);
       }
 
       // Step 2: Fallback - try to permanently delete from cash_book with [DELETED] prefix
@@ -4573,7 +4685,7 @@ class SupabaseDatabase {
   }
 
   // Enhanced connection test with multiple approaches
-  async testDatabaseConnectionEnhanced(): Promise<{ success: boolean; method: string; error?: any }> {
+  async testDatabaseConnectionEnhanced(): Promise<{ success: boolean; method: string; data?: any; count?: number | null; session?: any; error?: any }> {
     try {
       console.log('🔌 [TEST] Testing database connection with enhanced approach...');
       

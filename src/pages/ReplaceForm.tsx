@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
-import Select from '../components/UI/Select';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
 import { supabase } from '../lib/supabase';
@@ -12,12 +11,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '../lib/queryClient';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
-import { format, parseISO } from 'date-fns';
 import {
   TrendingUp,
   TrendingDown,
   FileText,
-  Replace,
   AlertCircle,
 } from 'lucide-react';
 
@@ -71,6 +68,88 @@ const ReplaceForm: React.FC = () => {
     totalCredit: 0,
     totalDebit: 0,
   });
+
+  // Dynamic entry counts for previews
+  const companyCounts = useMemo(() => {
+    const oldVal = replaceData.oldCompanyName?.trim();
+    const newVal = replaceData.newCompanyName?.trim();
+    
+    let oldCompanyEntriesCount = 0;
+    let newCompanyEntriesCount = 0;
+    
+    if (oldVal || newVal) {
+      entries.forEach(entry => {
+        const entryCompany = entry.company_name?.trim();
+        if (oldVal && entryCompany === oldVal) {
+          oldCompanyEntriesCount++;
+        }
+        if (newVal && entryCompany === newVal) {
+          newCompanyEntriesCount++;
+        }
+      });
+    }
+    
+    return {
+      oldReady: oldCompanyEntriesCount,
+      newExisting: newCompanyEntriesCount,
+      newAdded: oldCompanyEntriesCount,
+      newTotal: newCompanyEntriesCount + oldCompanyEntriesCount
+    };
+  }, [entries, replaceData.oldCompanyName, replaceData.newCompanyName]);
+
+  const accountCounts = useMemo(() => {
+    const oldVal = replaceData.oldAccountName?.trim();
+    const newVal = replaceData.newAccountName?.trim();
+    
+    let oldAccountEntriesCount = 0;
+    let newAccountEntriesCount = 0;
+    
+    if (oldVal || newVal) {
+      entries.forEach(entry => {
+        const entryAccount = entry.acc_name?.trim();
+        if (oldVal && entryAccount === oldVal) {
+          oldAccountEntriesCount++;
+        }
+        if (newVal && entryAccount === newVal) {
+          newAccountEntriesCount++;
+        }
+      });
+    }
+    
+    return {
+      oldReady: oldAccountEntriesCount,
+      newExisting: newAccountEntriesCount,
+      newAdded: oldAccountEntriesCount,
+      newTotal: newAccountEntriesCount + oldAccountEntriesCount
+    };
+  }, [entries, replaceData.oldAccountName, replaceData.newAccountName]);
+
+  const subAccountCounts = useMemo(() => {
+    const oldVal = replaceData.oldSubAccount?.trim();
+    const newVal = replaceData.newSubAccount?.trim();
+    
+    let oldSubAccountEntriesCount = 0;
+    let newSubAccountEntriesCount = 0;
+    
+    if (oldVal || newVal) {
+      entries.forEach(entry => {
+        const entrySubAccount = entry.sub_acc_name?.trim();
+        if (oldVal && entrySubAccount === oldVal) {
+          oldSubAccountEntriesCount++;
+        }
+        if (newVal && entrySubAccount === newVal) {
+          newSubAccountEntriesCount++;
+        }
+      });
+    }
+    
+    return {
+      oldReady: oldSubAccountEntriesCount,
+      newExisting: newSubAccountEntriesCount,
+      newAdded: oldSubAccountEntriesCount,
+      newTotal: newSubAccountEntriesCount + oldSubAccountEntriesCount
+    };
+  }, [entries, replaceData.oldSubAccount, replaceData.newSubAccount]);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -207,11 +286,13 @@ const ReplaceForm: React.FC = () => {
   const handleInputChange = (field: keyof ReplaceFormData, value: string) => {
     setReplaceData(prev => {
       // If selecting a filter (oldCompanyName, oldAccountName, or oldSubAccount),
-      // clear the other two filters to ensure only one is active at a time
+      // clear the other two filters to ensure only one is active at a time.
+      // Also, if the new selection matches the newly selected old value, clear the new selection.
       if (field === 'oldCompanyName' && value) {
         return {
           ...prev,
           oldCompanyName: value,
+          newCompanyName: prev.newCompanyName === value ? '' : prev.newCompanyName,
           oldAccountName: '', // Clear account name
           oldSubAccount: '', // Clear sub account
         };
@@ -219,6 +300,7 @@ const ReplaceForm: React.FC = () => {
         return {
           ...prev,
           oldAccountName: value,
+          newAccountName: prev.newAccountName === value ? '' : prev.newAccountName,
           oldCompanyName: '', // Clear company name
           oldSubAccount: '', // Clear sub account
         };
@@ -226,6 +308,7 @@ const ReplaceForm: React.FC = () => {
         return {
           ...prev,
           oldSubAccount: value,
+          newSubAccount: prev.newSubAccount === value ? '' : prev.newSubAccount,
           oldCompanyName: '', // Clear company name
           oldAccountName: '', // Clear account name
         };
@@ -270,11 +353,12 @@ const ReplaceForm: React.FC = () => {
       return;
     }
 
-    if (
-      window.confirm(
-        `Replace "${replaceData.oldAccountName}" with "${replaceData.newAccountName}" in ${matchingEntries.length} records?`
-      )
-    ) {
+    const confirmMessage = 
+      `Are you sure you want to replace Old Account Name: "${replaceData.oldAccountName}" with New Account Name: "${replaceData.newAccountName}"?\n\n` +
+      `This will update ${matchingEntries.length} cash book entries.\n\n` +
+      `This action cannot be undone.`;
+
+    if (window.confirm(confirmMessage)) {
       setLoading(true);
       try {
         // Use bulk update for better performance
@@ -301,9 +385,9 @@ const ReplaceForm: React.FC = () => {
             if (deleteError) {
               console.warn('Warning: Could not delete old account name from company_main_accounts:', deleteError);
               // Don't fail the whole operation if deletion fails - it's a cleanup step
-              toast.warning(
+              toast(
                 `${result.updatedCount} account names replaced successfully, but could not delete old account from reference table.`,
-                { duration: 4000 }
+                { icon: '⚠️', duration: 4000 }
               );
             } else {
               console.log('✅ Old account name deleted from company_main_accounts');
@@ -410,11 +494,12 @@ const ReplaceForm: React.FC = () => {
       return;
     }
 
-    if (
-      window.confirm(
-        `Replace "${replaceData.oldSubAccount}" with "${replaceData.newSubAccount}" in ${matchingEntries.length} records?`
-      )
-    ) {
+    const confirmMessage = 
+      `Are you sure you want to replace Old Sub Account: "${replaceData.oldSubAccount}" with New Sub Account: "${replaceData.newSubAccount}"?\n\n` +
+      `This will update ${matchingEntries.length} cash book entries.\n\n` +
+      `This action cannot be undone.`;
+
+    if (window.confirm(confirmMessage)) {
       setLoading(true);
       try {
         // Use bulk update for better performance
@@ -549,12 +634,12 @@ const ReplaceForm: React.FC = () => {
     }
 
     const confirmMessage = 
-      `Replace company name "${replaceData.oldCompanyName}" with "${replaceData.newCompanyName}"?\n\n` +
+      `Are you sure you want to replace Old Company Name: "${replaceData.oldCompanyName}" with New Company Name: "${replaceData.newCompanyName}"?\n\n` +
       `This will update:\n` +
       `• ${matchingEntries.length} cash book entries\n` +
       `• ${mainAccountsCount} main accounts\n` +
       `• ${subAccountsCount} sub accounts\n\n` +
-      `Are you sure you want to proceed?`;
+      `This action cannot be undone.`;
 
     if (window.confirm(confirmMessage)) {
       setLoading(true);
@@ -649,7 +734,7 @@ const ReplaceForm: React.FC = () => {
 
           if (deleteError) {
             console.error('Error deleting duplicate accounts:', deleteError);
-            toast.warning(`Warning: Could not delete ${accountsToDelete.length} duplicate accounts: ${deleteError.message}`);
+            toast(`Warning: Could not delete ${accountsToDelete.length} duplicate accounts: ${deleteError.message}`, { icon: '⚠️' });
           } else {
             deletedCount = accountsToDelete.length;
             console.log(`✅ Deleted ${deletedCount} duplicate accounts`);
@@ -756,7 +841,7 @@ const ReplaceForm: React.FC = () => {
 
           if (deleteSubError) {
             console.error('Error deleting duplicate sub accounts:', deleteSubError);
-            toast.warning(`Warning: Could not delete ${subAccountsToDelete.length} duplicate sub accounts: ${deleteSubError.message}`);
+            toast(`Warning: Could not delete ${subAccountsToDelete.length} duplicate sub accounts: ${deleteSubError.message}`, { icon: '⚠️' });
           } else {
             deletedSubCount = subAccountsToDelete.length;
             console.log(`✅ Deleted ${deletedSubCount} duplicate sub accounts`);
@@ -797,9 +882,10 @@ const ReplaceForm: React.FC = () => {
         if (cashBookError) {
           console.error('Error updating cash_book entries:', cashBookError);
           toast.error(`Failed to update cash book entries: ${cashBookError.message}`);
-          toast.warning(
+          toast(
             `However, ${mainAccountsUpdated} main accounts and ${subAccountsUpdated} sub accounts were updated. ` +
-            `You may need to manually update cash book entries.`
+            `You may need to manually update cash book entries.`,
+            { icon: '⚠️' }
           );
           setLoading(false);
           return;
@@ -823,9 +909,9 @@ const ReplaceForm: React.FC = () => {
             if (companyDeleteError) {
               console.warn('Warning: Could not delete old company name from companies table:', companyDeleteError);
               // Don't fail the whole operation if deletion fails - it's a cleanup step
-              toast.warning(
+              toast(
                 `Company name replaced successfully, but could not delete old company "${oldCompanyName}" from companies list.`,
-                { duration: 4000 }
+                { icon: '⚠️', duration: 4000 }
               );
             } else {
               console.log('✅ Old company name deleted from companies table');
@@ -865,7 +951,6 @@ const ReplaceForm: React.FC = () => {
           
           console.log('✅ Recent entries and companies dropdown refreshed - New Entry will update automatically with new company names');
           
-          const totalUpdated = cashBookEntriesUpdated + mainAccountsUpdated + subAccountsUpdated;
           const successMessage = oldCompanyDeleted
             ? `Company name replaced successfully! ` +
               `${cashBookEntriesUpdated} cash book entries, ` +
@@ -889,7 +974,7 @@ const ReplaceForm: React.FC = () => {
           localStorage.setItem('dashboard-refresh', Date.now().toString());
           window.dispatchEvent(new CustomEvent('dashboard-refresh'));
         } else {
-          toast.warning('No records were updated. Please check if the company name exists in the database.');
+          toast('No records were updated. Please check if the company name exists in the database.', { icon: '⚠️' });
         }
       } catch (error) {
         console.error('Error replacing company names:', error);
@@ -962,7 +1047,7 @@ const ReplaceForm: React.FC = () => {
             </h3>
             <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
               <div>
-                <Select
+                <SearchableSelect
                   label='Old Company Name'
                   value={replaceData.oldCompanyName}
                   onChange={value => handleInputChange('oldCompanyName', value)}
@@ -970,8 +1055,14 @@ const ReplaceForm: React.FC = () => {
                     { value: '', label: 'Select old company...' },
                     ...companies,
                   ]}
+                  placeholder='Select old company...'
                   disabled={!!replaceData.oldAccountName || !!replaceData.oldSubAccount}
                 />
+                {replaceData.oldCompanyName && (
+                  <div className='mt-2 text-xs font-semibold text-gray-700 bg-gray-55 p-2 rounded border border-gray-200'>
+                    Entries ready to move: <span className='text-red-600 font-bold'>{companyCounts.oldReady}</span>
+                  </div>
+                )}
               </div>
               <div>
                 <SearchableSelect
@@ -980,11 +1071,20 @@ const ReplaceForm: React.FC = () => {
                   onChange={value => handleInputChange('newCompanyName', value)}
                   options={[
                     { value: '', label: 'Select new company...' },
-                    ...companies,
+                    ...companies.filter(c => c.value !== replaceData.oldCompanyName),
                   ]}
                   placeholder='Select new company...'
                   disabled={!!replaceData.oldAccountName || !!replaceData.oldSubAccount}
                 />
+                {replaceData.newCompanyName && (
+                  <div className='mt-2 text-xs text-gray-700 bg-gray-55 p-2 rounded border border-gray-200 space-y-1'>
+                    <div>Existing entries: <span className='font-semibold text-gray-900'>{companyCounts.newExisting}</span></div>
+                    <div>Entries being added: <span className='font-semibold text-green-600'>+{companyCounts.newAdded}</span></div>
+                    <div className='border-t border-gray-300 pt-1 font-bold text-gray-900'>
+                      Total after replace: {companyCounts.newTotal}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
             <div className='mt-4 flex justify-center'>
@@ -1012,16 +1112,22 @@ const ReplaceForm: React.FC = () => {
             </h3>
             <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
               <div>
-                <Select
-                  label='Old AccountName'
+                <SearchableSelect
+                  label='Old Account Name'
                   value={replaceData.oldAccountName}
                   onChange={value => handleInputChange('oldAccountName', value)}
                   options={[
                     { value: '', label: 'Select old account...' },
                     ...accounts,
                   ]}
+                  placeholder='Select old account...'
                   disabled={!!replaceData.oldCompanyName || !!replaceData.oldSubAccount}
                 />
+                {replaceData.oldAccountName && (
+                  <div className='mt-2 text-xs font-semibold text-gray-700 bg-gray-55 p-2 rounded border border-gray-200'>
+                    Entries ready to move: <span className='text-red-600 font-bold'>{accountCounts.oldReady}</span>
+                  </div>
+                )}
               </div>
               <div>
                 <SearchableSelect
@@ -1030,11 +1136,20 @@ const ReplaceForm: React.FC = () => {
                   onChange={value => handleInputChange('newAccountName', value)}
                   options={[
                     { value: '', label: 'Select new account...' },
-                    ...newAccounts,
+                    ...newAccounts.filter(a => a.value !== replaceData.oldAccountName),
                   ]}
                   placeholder='Select new account...'
                   disabled={!!replaceData.oldCompanyName || !!replaceData.oldSubAccount}
                 />
+                {replaceData.newAccountName && (
+                  <div className='mt-2 text-xs text-gray-700 bg-gray-55 p-2 rounded border border-gray-200 space-y-1'>
+                    <div>Existing entries: <span className='font-semibold text-gray-900'>{accountCounts.newExisting}</span></div>
+                    <div>Entries being added: <span className='font-semibold text-green-600'>+{accountCounts.newAdded}</span></div>
+                    <div className='border-t border-gray-300 pt-1 font-bold text-gray-900'>
+                      Total after replace: {accountCounts.newTotal}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
             <div className='mt-4 flex justify-center'>
@@ -1062,16 +1177,22 @@ const ReplaceForm: React.FC = () => {
             </h3>
             <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
               <div>
-                <Select
-                  label='Old SubAccount'
+                <SearchableSelect
+                  label='Old Sub Account'
                   value={replaceData.oldSubAccount}
                   onChange={value => handleInputChange('oldSubAccount', value)}
                   options={[
                     { value: '', label: 'Select old sub account...' },
                     ...subAccounts,
                   ]}
+                  placeholder='Select old sub account...'
                   disabled={!!replaceData.oldCompanyName || !!replaceData.oldAccountName}
                 />
+                {replaceData.oldSubAccount && (
+                  <div className='mt-2 text-xs font-semibold text-gray-700 bg-gray-55 p-2 rounded border border-gray-200'>
+                    Entries ready to move: <span className='text-red-600 font-bold'>{subAccountCounts.oldReady}</span>
+                  </div>
+                )}
               </div>
               <div>
                 <SearchableSelect
@@ -1080,11 +1201,20 @@ const ReplaceForm: React.FC = () => {
                   onChange={value => handleInputChange('newSubAccount', value)}
                   options={[
                     { value: '', label: 'Select new sub account...' },
-                    ...newSubAccounts,
+                    ...newSubAccounts.filter(s => s.value !== replaceData.oldSubAccount),
                   ]}
                   placeholder='Select new sub account...'
                   disabled={!!replaceData.oldCompanyName || !!replaceData.oldAccountName}
                 />
+                {replaceData.newSubAccount && (
+                  <div className='mt-2 text-xs text-gray-700 bg-gray-55 p-2 rounded border border-gray-200 space-y-1'>
+                    <div>Existing entries: <span className='font-semibold text-gray-900'>{subAccountCounts.newExisting}</span></div>
+                    <div>Entries being added: <span className='font-semibold text-green-600'>+{subAccountCounts.newAdded}</span></div>
+                    <div className='border-t border-gray-300 pt-1 font-bold text-gray-900'>
+                      Total after replace: {subAccountCounts.newTotal}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
             <div className='mt-4 flex justify-center'>

@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, forwardRef } from 'react';
-import { ChevronDown, Search, X } from 'lucide-react';
+import React, { useState, useRef, useEffect, forwardRef, useMemo } from 'react';
+import { ChevronDown, X } from 'lucide-react';
 
 interface SearchableSelectProps {
   label?: string;
@@ -12,9 +12,9 @@ interface SearchableSelectProps {
   className?: string;
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onSelect?: (value: string) => void; // New callback for when an option is selected
-  searchPlaceholder?: string;
   noOptionsMessage?: string;
   size?: 'sm' | 'md' | 'lg';
+  tabIndex?: number;
 }
 
 const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
@@ -30,9 +30,9 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       className = '',
       onKeyDown,
       onSelect,
-      searchPlaceholder = 'Search...',
       noOptionsMessage = 'No options found',
       size = 'md',
+      tabIndex,
     },
     ref
   ) => {
@@ -40,16 +40,34 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
     const [searchTerm, setSearchTerm] = useState('');
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
     const dropdownRef = useRef<HTMLDivElement>(null);
-    const inputRef = useRef<HTMLInputElement>(null);
+    const internalInputRef = useRef<HTMLInputElement>(null);
+    const inputRef = (ref as React.RefObject<HTMLInputElement>) || internalInputRef;
 
     // Get the selected option label
     const selectedOption = options.find(option => option.value === value);
     const displayValue = selectedOption ? selectedOption.label : '';
 
-    // Filter options based on search term
-    const filteredOptions = options.filter(option =>
-      option.label.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    // Filter options based on search term and prioritize matches starting with searchTerm
+    const filteredOptions = useMemo(() => {
+      if (!searchTerm.trim()) {
+        return options;
+      }
+      
+      const term = searchTerm.toLowerCase().trim();
+      const startsWithMatch: { value: string; label: string }[] = [];
+      const containsMatch: { value: string; label: string }[] = [];
+
+      options.forEach(option => {
+        const labelLower = option.label.toLowerCase();
+        if (labelLower.startsWith(term)) {
+          startsWithMatch.push(option);
+        } else if (labelLower.includes(term)) {
+          containsMatch.push(option);
+        }
+      });
+
+      return [...startsWithMatch, ...containsMatch];
+    }, [options, searchTerm]);
 
     // Handle click outside to close dropdown
     useEffect(() => {
@@ -64,6 +82,34 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    // Keep highlightedIndex in sync when options change or dropdown opens
+    useEffect(() => {
+      if (isOpen) {
+        if (searchTerm.trim().length > 0) {
+          // If user has typed something, default to first filtered option
+          setHighlightedIndex(0);
+        } else {
+          // If no search term, highlight the currently selected option, or first option
+          const selectedIndex = filteredOptions.findIndex(opt => opt.value === value);
+          setHighlightedIndex(selectedIndex >= 0 ? selectedIndex : 0);
+        }
+      } else {
+        setHighlightedIndex(-1);
+      }
+    }, [isOpen, filteredOptions, value, searchTerm]);
+
+    const handleSelect = (selectedValue: string) => {
+      onChange(selectedValue);
+      setIsOpen(false);
+      setSearchTerm('');
+      setHighlightedIndex(-1);
+      
+      // Call onSelect callback if provided (for auto-navigation)
+      if (onSelect) {
+        onSelect(selectedValue);
+      }
+    };
 
     // Handle keyboard navigation
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -97,29 +143,44 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
             // When closed, allow parent to handle Enter (to move focus)
             if (onKeyDown) {
               onKeyDown(e);
-            } else {
-              // fallback: open the dropdown if no parent handler
-              e.preventDefault();
-              setIsOpen(true);
             }
           } else {
-            // Dropdown open but nothing highlighted: pass to parent for focus advance
+            // Dropdown open but nothing highlighted or found: close and pass to parent
+            setIsOpen(false);
             if (onKeyDown) {
               onKeyDown(e);
-            } else {
-              e.preventDefault();
             }
           }
           break;
         case 'Escape':
+          e.preventDefault();
           setIsOpen(false);
           setSearchTerm('');
           setHighlightedIndex(-1);
           break;
         case 'Tab':
+          // Tab selects the highlighted/best option if user typed or navigated
+          if (isOpen && filteredOptions.length > 0) {
+            const hasUserTyped = searchTerm.length > 0;
+            const hasNavigated = highlightedIndex >= 0;
+            
+            if (hasUserTyped || hasNavigated) {
+              const indexToSelect = highlightedIndex >= 0 ? highlightedIndex : 0;
+              if (filteredOptions[indexToSelect]) {
+                if (e.shiftKey) {
+                  // Select option but do not run onSelect (to avoid forward auto-focus)
+                  onChange(filteredOptions[indexToSelect].value);
+                } else {
+                  // Select option and run onSelect
+                  handleSelect(filteredOptions[indexToSelect].value);
+                }
+              }
+            }
+          }
           setIsOpen(false);
           setSearchTerm('');
           setHighlightedIndex(-1);
+          // Let the Tab key event propagate normally so it shifts focus to the next/previous field
           break;
         default:
           // Call the parent onKeyDown if provided
@@ -130,36 +191,25 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       }
     };
 
-    const handleSelect = (selectedValue: string) => {
-      onChange(selectedValue);
-      setIsOpen(false);
-      setSearchTerm('');
-      setHighlightedIndex(-1);
-      
-      // Call onSelect callback if provided (for auto-navigation)
-      if (onSelect) {
-        onSelect(selectedValue);
-      }
-    };
-
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const newSearchTerm = e.target.value;
       setSearchTerm(newSearchTerm);
-      setHighlightedIndex(-1);
       
       // If user is typing and dropdown is closed, open it
-      if (!isOpen && newSearchTerm.length > 0) {
+      if (!isOpen) {
         setIsOpen(true);
       }
     };
 
     const handleInputClick = () => {
       if (!disabled) {
-        setIsOpen(!isOpen);
-        if (!isOpen) {
-          setSearchTerm('');
-          setHighlightedIndex(-1);
-        }
+        setIsOpen(true);
+      }
+    };
+
+    const handleFocus = () => {
+      if (!disabled && !isOpen) {
+        setIsOpen(true);
       }
     };
 
@@ -168,14 +218,20 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       onChange('');
       setSearchTerm('');
       setHighlightedIndex(-1);
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
     };
 
     return (
       <div className={`relative ${className}`} ref={dropdownRef}>
         {label && (
-          <label className={`block font-bold text-gray-700 mb-1 ${
-            size === 'sm' ? 'text-xs' : size === 'lg' ? 'text-base' : 'text-sm'
-          }`} style={{ fontFamily: 'Times New Roman', fontSize: '14px', fontWeight: 'bold' }}>
+          <label 
+            className={`block font-bold text-gray-700 mb-1 ${
+              size === 'sm' ? 'text-xs' : size === 'lg' ? 'text-base' : 'text-sm'
+            }`} 
+            style={{ fontFamily: 'Times New Roman', fontSize: '14px', fontWeight: 'bold' }}
+          >
             {label}
             {required && <span className='text-red-500 ml-1'>*</span>}
           </label>
@@ -183,15 +239,21 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
         
         <div className='relative'>
           <input
-            ref={ref || inputRef}
+            ref={inputRef}
             type='text'
             value={isOpen ? searchTerm : (className.includes('staff-field') ? displayValue.toUpperCase() : displayValue)}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             onClick={handleInputClick}
-            placeholder={isOpen ? searchPlaceholder : placeholder}
+            onFocus={handleFocus}
+            placeholder={isOpen && displayValue ? displayValue : placeholder}
             disabled={disabled}
             required={required}
+            tabIndex={tabIndex}
+            role='combobox'
+            aria-expanded={isOpen}
+            aria-autocomplete='list'
+            aria-controls={isOpen && label ? `${label.replace(/\s+/g, '-').toLowerCase()}-listbox` : undefined}
             className={`w-full pr-20 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed font-bold ${
               size === 'sm' ? 'px-2 py-1 text-sm' : size === 'lg' ? 'px-4 py-3 text-lg' : 'px-3 py-2 text-base'
             } ${className.includes('staff-field') ? 'uppercase' : ''}`}
@@ -203,37 +265,61 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
             }}
           />
           
-          <div className='absolute inset-y-0 right-0 flex items-center'>
+          <div className='absolute inset-y-0 right-0 flex items-center pr-1'>
             {value && !disabled && (
               <button
                 type='button'
                 onClick={handleClear}
-                className='p-1 text-gray-400 hover:text-gray-600 mr-1'
+                tabIndex={-1}
+                className='p-1 text-gray-400 hover:text-gray-600 mr-1 focus:outline-none'
               >
                 <X size={16} />
               </button>
             )}
-            <div className='p-1 text-gray-400'>
+            <button
+              type='button'
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                if (!disabled) {
+                  setIsOpen(prev => !prev);
+                  if (isOpen && inputRef.current) {
+                    inputRef.current.blur();
+                  } else if (inputRef.current) {
+                    inputRef.current.focus();
+                  }
+                }
+              }}
+              onMouseDown={(e) => e.preventDefault()} // Prevents input blur on click
+              tabIndex={-1}
+              className='p-1 text-gray-400 hover:text-gray-600 focus:outline-none'
+            >
               <ChevronDown 
                 size={16} 
-                className={`transition-transform ${isOpen ? 'rotate-180' : ''}`}
+                className={`transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
               />
-            </div>
+            </button>
           </div>
         </div>
 
         {isOpen && (
-          <div className='absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto'>
+          <div 
+            id={label ? `${label.replace(/\s+/g, '-').toLowerCase()}-listbox` : undefined}
+            role='listbox'
+            className='absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto'
+          >
             {filteredOptions.length > 0 ? (
               filteredOptions.map((option, index) => (
                 <div
                   key={option.value}
-                  className={`px-3 py-2 cursor-pointer transition-colors ${
+                  role='option'
+                  aria-selected={option.value === value}
+                  className={`px-3 py-2 cursor-pointer transition-colors text-sm ${
                     index === highlightedIndex
-                      ? 'bg-blue-100 text-blue-900'
+                      ? 'bg-blue-100 text-blue-900 font-semibold'
                       : 'hover:bg-gray-100'
                   } ${
-                    option.value === value ? 'bg-blue-50 text-blue-900 font-medium' : ''
+                    option.value === value ? 'bg-blue-50 text-blue-900 font-bold' : ''
                   }`}
                   onClick={() => handleSelect(option.value)}
                   onMouseEnter={() => setHighlightedIndex(index)}
@@ -242,7 +328,7 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
                 </div>
               ))
             ) : (
-              <div className='px-3 py-2 text-gray-500 text-sm'>
+              <div className='px-3 py-2 text-gray-500 text-sm' role='status'>
                 {noOptionsMessage}
               </div>
             )}

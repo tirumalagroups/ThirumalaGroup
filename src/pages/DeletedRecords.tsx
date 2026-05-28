@@ -3,7 +3,6 @@ import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
-import { supabase } from '../lib/supabase';
 import { getTableName } from '../lib/tableNames';
 import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
@@ -13,15 +12,13 @@ import {
   RotateCcw,
   Search,
   Calendar,
-  Building,
-  User,
-  Download,
   RefreshCw,
   AlertTriangle,
   CheckCircle,
   XCircle,
   ChevronLeft,
   ChevronRight,
+  Download,
 } from 'lucide-react';
 
 interface DeletedRecord {
@@ -45,7 +42,7 @@ interface DeletedRecord {
 }
 
 const DeletedRecords: React.FC = () => {
-  const { user, isAdmin } = useAuth();
+  const { isAdmin } = useAuth();
   const [deletedRecords, setDeletedRecords] = useState<DeletedRecord[]>([]);
   const [filteredRecords, setFilteredRecords] = useState<DeletedRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -60,7 +57,6 @@ const DeletedRecords: React.FC = () => {
   // Dropdown options
   const [companies, setCompanies] = useState<{ value: string; label: string }[]>([]);
   const [users, setUsers] = useState<{ value: string; label: string }[]>([]);
-  const [dates, setDates] = useState<{ value: string; label: string }[]>([]);
   
   // Calendar state
   const [showCalendar, setShowCalendar] = useState(false);
@@ -178,21 +174,7 @@ const DeletedRecords: React.FC = () => {
       }));
       setUsers([{ value: '', label: 'All Users' }, ...usersOptions]);
 
-      // Load unique dates from deleted records
-      const { data: dateData } = await supabase
-        .from(getTableName('deleted_cash_book'))
-        .select('deleted_at')
-        .order('deleted_at', { ascending: false });
-      
-      const uniqueDates = [...new Set(
-        dateData?.map(record => record.deleted_at?.split('T')[0]).filter(Boolean) || []
-      )];
-      
-      const dateOptions = uniqueDates.map(date => ({
-        value: date,
-        label: format(new Date(date), 'dd/MM/yyyy'),
-      }));
-      setDates([{ value: '', label: 'All Dates' }, ...dateOptions]);
+
     } catch (error) {
       console.error('Error loading dropdown data:', error);
     }
@@ -201,16 +183,63 @@ const DeletedRecords: React.FC = () => {
   const applyFilters = () => {
     let filtered = [...deletedRecords];
 
-    // Search filter
+    // Search filter matching all columns
     if (searchTerm) {
-      filtered = filtered.filter(record =>
-        record.particulars?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.acc_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.sub_acc_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.company_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.staff?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.users?.toLowerCase().includes(searchTerm.toLowerCase())
-      );
+      const searchLower = searchTerm.toLowerCase().trim();
+      filtered = filtered.filter(record => {
+        // Date checks
+        let dateStr1 = '';
+        let dateStr2 = '';
+        if (record.c_date) {
+          try {
+            const dateObj = new Date(record.c_date);
+            if (!isNaN(dateObj.getTime())) {
+              dateStr1 = format(dateObj, 'dd/MM/yyyy');
+              dateStr2 = format(dateObj, 'yyyy-MM-dd');
+            }
+          } catch {
+            /* ignore date parsing errors */
+          }
+        }
+        
+        let delDateStr1 = '';
+        let delDateStr2 = '';
+        let delTimeStr = '';
+        if (record.deleted_at) {
+          try {
+            const dateObj = new Date(record.deleted_at);
+            if (!isNaN(dateObj.getTime())) {
+              delDateStr1 = format(dateObj, 'dd/MM/yyyy');
+              delDateStr2 = format(dateObj, 'yyyy-MM-dd');
+              delTimeStr = format(dateObj, 'HH:mm');
+            }
+          } catch {
+            /* ignore date parsing errors */
+          }
+        }
+
+        const creditStr = record.credit != null ? String(record.credit) : '';
+        const debitStr = record.debit != null ? String(record.debit) : '';
+        const paymentModeStr = (record as any).payment_mode || '';
+        
+        return (
+          (record.particulars || '').toLowerCase().includes(searchLower) ||
+          (record.acc_name || '').toLowerCase().includes(searchLower) ||
+          (record.sub_acc_name || '').toLowerCase().includes(searchLower) ||
+          (record.company_name || '').toLowerCase().includes(searchLower) ||
+          (record.staff || '').toLowerCase().includes(searchLower) ||
+          (record.users || '').toLowerCase().includes(searchLower) ||
+          (record.deleted_by || '').toLowerCase().includes(searchLower) ||
+          paymentModeStr.toLowerCase().includes(searchLower) ||
+          creditStr.includes(searchLower) ||
+          debitStr.includes(searchLower) ||
+          dateStr1.includes(searchLower) ||
+          dateStr2.includes(searchLower) ||
+          delDateStr1.includes(searchLower) ||
+          delDateStr2.includes(searchLower) ||
+          delTimeStr.includes(searchLower)
+        );
+      });
     }
 
     // Date filter
@@ -275,35 +304,7 @@ const DeletedRecords: React.FC = () => {
     }
   };
 
-  const permanentlyDeleteRecord = async (record: DeletedRecord) => {
-    if (!isAdmin) {
-      toast.error('Only admins can permanently delete records');
-      return;
-    }
 
-    if (!window.confirm(`Are you sure you want to PERMANENTLY delete entry #${record.sno}? This cannot be undone.`)) {
-      return;
-    }
-
-    try {
-      console.log('🗑️ Permanently deleting record:', record.id);
-      
-      // Use the new permanent delete function from supabaseDatabase
-      const success = await supabaseDB.permanentlyDeleteCashBookEntry(record.id);
-
-      if (success) {
-        // Refresh the list
-        await loadDeletedRecords();
-        toast.success(`Entry #${record.sno} permanently deleted!`);
-      } else {
-        toast.error('Failed to permanently delete record');
-      }
-      
-    } catch (error) {
-      console.error('Error permanently deleting record:', error);
-      toast.error('Failed to permanently delete record');
-    }
-  };
 
   const exportToExcel = () => {
     const exportData = filteredRecords.map((record, index) => ({
@@ -351,11 +352,23 @@ const DeletedRecords: React.FC = () => {
 
   const getStatusIcon = (record: DeletedRecord) => {
     if (record.approved) {
-      return <CheckCircle className="w-4 h-4 text-green-600" title="Approved" />;
+      return (
+        <span title="Approved">
+          <CheckCircle className="w-4 h-4 text-green-600" />
+        </span>
+      );
     } else if (record.edited) {
-      return <AlertTriangle className="w-4 h-4 text-yellow-600" title="Edited" />;
+      return (
+        <span title="Edited">
+          <AlertTriangle className="w-4 h-4 text-yellow-600" />
+        </span>
+      );
     } else {
-      return <XCircle className="w-4 h-4 text-red-600" title="Pending" />;
+      return (
+        <span title="Pending">
+          <XCircle className="w-4 h-4 text-red-600" />
+        </span>
+      );
     }
   };
 
@@ -370,7 +383,6 @@ const DeletedRecords: React.FC = () => {
     const month = currentMonth.getMonth();
     
     const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
     const startDate = new Date(firstDay);
     startDate.setDate(startDate.getDate() - firstDay.getDay());
     
@@ -507,6 +519,14 @@ const DeletedRecords: React.FC = () => {
           <div className='flex gap-2'>
             <Button
               variant='secondary'
+              onClick={exportToExcel}
+              className='flex items-center gap-2'
+              icon={Download}
+            >
+              Export
+            </Button>
+            <Button
+              variant='secondary'
               onClick={loadDeletedRecords}
               disabled={loading}
               className='flex items-center gap-2'
@@ -520,21 +540,7 @@ const DeletedRecords: React.FC = () => {
         {/* Filters */}
         <Card className='bg-gradient-to-r from-red-50 to-orange-50 border-red-200'>
           <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4'>
-            <div className='lg:col-span-2'>
-              <label className='block text-sm font-medium text-gray-700 mb-1'>
-                Search
-              </label>
-              <div className='relative'>
-                <Search className='w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400' />
-                <input
-                  type='text'
-                  placeholder='Search entries...'
-                  value={searchTerm}
-                  onChange={e => setSearchTerm(e.target.value)}
-                  className='pl-10 pr-4 py-2 w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500'
-                />
-              </div>
-            </div>
+            {/* Date Filter */}
             <div className='relative calendar-container'>
               <label className='block text-sm font-medium text-gray-700 mb-1'>
                 Date
@@ -580,6 +586,8 @@ const DeletedRecords: React.FC = () => {
                 />
               )}
             </div>
+
+            {/* Company Filter */}
             <div>
               <SearchableSelect
                 label='Company'
@@ -589,6 +597,8 @@ const DeletedRecords: React.FC = () => {
                 placeholder='Select company...'
               />
             </div>
+
+            {/* Deleted By Filter */}
             <div>
               <SearchableSelect
                 label='Deleted By'
@@ -597,6 +607,23 @@ const DeletedRecords: React.FC = () => {
                 options={users}
                 placeholder='Select user...'
               />
+            </div>
+
+            {/* Search Box */}
+            <div className='lg:col-span-2'>
+              <label className='block text-sm font-medium text-gray-700 mb-1'>
+                Search
+              </label>
+              <div className='relative'>
+                <Search className='w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400' />
+                <input
+                  type='text'
+                  placeholder='Search entries...'
+                  value={searchTerm}
+                  onChange={e => setSearchTerm(e.target.value)}
+                  className='pl-10 pr-4 py-2 w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500'
+                />
+              </div>
             </div>
           </div>
         </Card>
@@ -693,7 +720,7 @@ const DeletedRecords: React.FC = () => {
                       <td className='w-16 px-1 py-1 text-sm font-bold'>{format(new Date(record.c_date), 'dd/MM/yyyy')}</td>
                       <td className='w-20 px-1 py-1 text-sm truncate font-bold' title={record.company_name}>{record.company_name}</td>
                       <td className='w-20 px-1 py-1 text-sm truncate font-bold' title={record.acc_name}>{record.acc_name}</td>
-                      <td className='w-20 px-1 py-1 text-sm truncate font-bold' title={record.sub_acc_name}>{record.sub_acc_name || '-'}</td>
+                      <td className='w-20 px-1 py-1 text-sm truncate font-bold' title={record.sub_acc_name || undefined}>{record.sub_acc_name || '-'}</td>
                       <td className='w-32 px-1 py-1 text-sm truncate font-bold' title={record.particulars || ''}>
                         {record.particulars || '-'}
                       </td>
@@ -703,7 +730,7 @@ const DeletedRecords: React.FC = () => {
                       <td className='w-16 px-1 py-1 text-right text-red-700 text-sm font-bold'>
                         {record.debit > 0 ? `${record.debit.toLocaleString()}` : '-'}
                       </td>
-                      <td className='w-16 px-1 py-1 text-sm truncate font-bold' title={record.staff}>{record.staff || '-'}</td>
+                      <td className='w-16 px-1 py-1 text-sm truncate font-bold' title={record.staff || undefined}>{record.staff || '-'}</td>
                       <td className='w-20 px-1 py-1 font-medium text-red-700 text-sm font-bold'>{record.deleted_by || record.users || record.staff || '-'}</td>
                       <td className='w-24 px-1 py-1 text-gray-600 text-sm font-bold'>
                         {record.deleted_at ? format(new Date(record.deleted_at), 'dd/MM/yyyy HH:mm') : 
@@ -724,17 +751,6 @@ const DeletedRecords: React.FC = () => {
                             >
                               <RotateCcw className='w-3 h-3' />
                               <span className='sr-only'>Restore</span>
-                            </Button>
-                            <Button
-                              size='sm'
-                              variant='danger'
-                              onClick={() => permanentlyDeleteRecord(record)}
-                              disabled={!isAdmin}
-                              className='p-1'
-                              title='Permanently Delete'
-                            >
-                              <Trash2 className='w-3 h-3' />
-                              <span className='sr-only'>Delete</span>
                             </Button>
                           </div>
                         </td>

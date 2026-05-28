@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
@@ -9,7 +9,7 @@ import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import { format, parseISO } from 'date-fns';
-import { Calendar } from 'lucide-react';
+import { Calendar, Search } from 'lucide-react';
 import CustomCalendar from '../components/UI/CustomCalendar';
 
 interface LedgerSummaryFilters {
@@ -72,6 +72,7 @@ const LedgerSummary: React.FC = () => {
     SubAccountSummary[]
   >([]);
   const [loading, setLoading] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [activeTab, setActiveTab] = useState<
     'company' | 'mainAccount' | 'subAccount'
   >('company');
@@ -79,19 +80,64 @@ const LedgerSummary: React.FC = () => {
   const [showToCalendar, setShowToCalendar] = useState(false);
   const [allEntries, setAllEntries] = useState<any[]>([]);
 
-  // Dropdown data
-  const [companies, setCompanies] = useState<
-    { value: string; label: string }[]
-  >([]);
-  const [accounts, setAccounts] = useState<{ value: string; label: string }[]>(
-    []
-  );
-  const [subAccounts, setSubAccounts] = useState<
-    { value: string; label: string }[]
-  >([]);
-  const [staffList, setStaffList] = useState<
-    { value: string; label: string }[]
-  >([]);
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // 1. Get entries within the date range (fromDate to toDate)
+  const entriesInRange = useMemo(() => {
+    if (!filters.betweenDates) return allEntries;
+    const fromStr = filters.fromDate;
+    const toStr = filters.toDate;
+    return allEntries.filter(entry => {
+      return entry.c_date >= fromStr && entry.c_date <= toStr;
+    });
+  }, [allEntries, filters.fromDate, filters.toDate, filters.betweenDates]);
+
+  // 2. Companies in range
+  const companyOptions = useMemo(() => {
+    const distinctCompanies = [...new Set(entriesInRange.map(e => e.company_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Companies' },
+      ...distinctCompanies.map(name => ({ value: name, label: name }))
+    ];
+  }, [entriesInRange]);
+
+  // 3. Accounts in range (filtered by selected company if any)
+  const accountOptions = useMemo(() => {
+    let filtered = entriesInRange;
+    if (filters.companyName) {
+      filtered = filtered.filter(e => e.company_name === filters.companyName);
+    }
+    const distinctAccounts = [...new Set(filtered.map(e => e.acc_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Accounts' },
+      ...distinctAccounts.map(name => ({ value: name, label: name }))
+    ];
+  }, [entriesInRange, filters.companyName]);
+
+  // 4. Sub Accounts in range (filtered by selected company and main account)
+  const subAccountOptions = useMemo(() => {
+    let filtered = entriesInRange;
+    if (filters.companyName) {
+      filtered = filtered.filter(e => e.company_name === filters.companyName);
+    }
+    if (filters.mainAccount) {
+      filtered = filtered.filter(e => e.acc_name === filters.mainAccount);
+    }
+    const distinctSubAccounts = [...new Set(filtered.map(e => e.sub_acc_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Sub Accounts' },
+      ...distinctSubAccounts.map(name => ({ value: name, label: name }))
+    ];
+  }, [entriesInRange, filters.companyName, filters.mainAccount]);
+
+  // 5. Staff in range
+  const staffOptions = useMemo(() => {
+    const distinctStaff = [...new Set(entriesInRange.map(e => e.staff).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Staff' },
+      ...distinctStaff.map(name => ({ value: name, label: name }))
+    ];
+  }, [entriesInRange]);
 
   // Visible dd/MM/yyyy inputs + hidden pickers
   const [fromDateInput, setFromDateInput] = useState('');
@@ -103,7 +149,9 @@ const LedgerSummary: React.FC = () => {
     try {
       setFromDateInput(filters.fromDate ? format(new Date(filters.fromDate), 'dd/MM/yyyy') : '');
       setToDateInput(filters.toDate ? format(new Date(filters.toDate), 'dd/MM/yyyy') : '');
-    } catch {}
+    } catch (e) {
+      console.error('Error formatting date:', e);
+    }
   }, [filters.fromDate, filters.toDate]);
 
   // Load all entries for calendar green dots
@@ -130,19 +178,8 @@ const LedgerSummary: React.FC = () => {
   });
 
   useEffect(() => {
-    loadDropdownData();
-    loadAccountsByCompany();
-    loadSubAccountsByAccount();
     generateSummary();
   }, []);
-
-  useEffect(() => {
-    loadAccountsByCompany();
-  }, [filters.companyName]);
-
-  useEffect(() => {
-    loadSubAccountsByAccount();
-  }, [filters.companyName, filters.mainAccount]);
 
   // Implement live filtering: call generateSummary automatically when filters change
   useEffect(() => {
@@ -150,84 +187,42 @@ const LedgerSummary: React.FC = () => {
     // eslint-disable-next-line
   }, [filters, activeTab]);
 
-  const loadDropdownData = async () => {
-    try {
-      // Load companies
-      const companies = await supabaseDB.getCompaniesWithData();
-      const companiesData = companies.map(company => ({
-        value: company.company_name,
-        label: company.company_name,
-      }));
-      setCompanies([{ value: '', label: 'All Companies' }, ...companiesData]);
+  // Reset child filters if their currently selected values are no longer available in the dynamically filtered lists
+  useEffect(() => {
+    setFilters(prev => {
+      let updated = false;
+      const newFilters = { ...prev };
 
-      // Load staff
-      const users = await supabaseDB.getUsers();
-      const usersData = users
-        .filter(u => u.is_active)
-        .map(user => ({
-          value: user.username,
-          label: user.username,
-        }));
-      setStaffList([{ value: '', label: 'All Staff' }, ...usersData]);
-    } catch (error) {
-      console.error('Error loading dropdown data:', error);
-      toast.error('Failed to load dropdown data');
-    }
-  };
-
-  const loadAccountsByCompany = async () => {
-    try {
-      let accounts: string[] = [];
-      
-      if (filters.companyName) {
-        // Load accounts for specific company
-        accounts = await supabaseDB.getDistinctAccountNamesByCompany(
-          filters.companyName
-        );
-      } else {
-        // Load all accounts when no company is selected
-        accounts = await supabaseDB.getDistinctAccountNames();
+      // 1. Company Name
+      if (newFilters.companyName && !companyOptions.some(c => c.value === newFilters.companyName)) {
+        newFilters.companyName = '';
+        newFilters.mainAccount = '';
+        newFilters.subAccount = '';
+        updated = true;
       }
-      
-      const accountsData = accounts.map(account => ({
-        value: account,
-        label: account,
-      }));
-      setAccounts([{ value: '', label: 'All Accounts' }, ...accountsData]);
-    } catch (error) {
-      console.error('Error loading accounts:', error);
-      toast.error('Failed to load accounts');
-    }
-  };
 
-  const loadSubAccountsByAccount = async () => {
-    try {
-      let subAccounts: string[] = [];
-      
-      if (filters.companyName && filters.mainAccount) {
-        // Load sub accounts for specific company and main account
-        subAccounts = await supabaseDB.getSubAccountsByAccountAndCompany(
-          filters.mainAccount,
-          filters.companyName
-        );
-      } else {
-        // Load all sub accounts when no company/main account is selected
-        subAccounts = await supabaseDB.getDistinctSubAccountNames();
+      // 2. Main Account
+      if (newFilters.mainAccount && !accountOptions.some(a => a.value === newFilters.mainAccount)) {
+        newFilters.mainAccount = '';
+        newFilters.subAccount = '';
+        updated = true;
       }
-      
-      const subAccountsData = subAccounts.map(subAcc => ({
-        value: subAcc,
-        label: subAcc,
-      }));
-      setSubAccounts([
-        { value: '', label: 'All Sub Accounts' },
-        ...subAccountsData,
-      ]);
-    } catch (error) {
-      console.error('Error loading sub accounts:', error);
-      toast.error('Failed to load sub accounts');
-    }
-  };
+
+      // 3. Sub Account
+      if (newFilters.subAccount && !subAccountOptions.some(s => s.value === newFilters.subAccount)) {
+        newFilters.subAccount = '';
+        updated = true;
+      }
+
+      // 4. Staff
+      if (newFilters.staff && !staffOptions.some(s => s.value === newFilters.staff)) {
+        newFilters.staff = '';
+        updated = true;
+      }
+
+      return updated ? newFilters : prev;
+    });
+  }, [companyOptions, accountOptions, subAccountOptions, staffOptions]);
 
   const generateSummary = async () => {
     setLoading(true);
@@ -469,18 +464,17 @@ const LedgerSummary: React.FC = () => {
     field: keyof LedgerSummaryFilters,
     value: any
   ) => {
-    setFilters(prev => ({
-      ...prev,
-      [field]: value,
-    }));
-
-    // Reset dependent filters
-    if (field === 'companyName') {
-      setFilters(prev => ({ ...prev, mainAccount: '', subAccount: '' }));
-    }
-    if (field === 'mainAccount') {
-      setFilters(prev => ({ ...prev, subAccount: '' }));
-    }
+    setFilters(prev => {
+      const newFilters = { ...prev, [field]: value };
+      if (field === 'companyName') {
+        newFilters.mainAccount = '';
+        newFilters.subAccount = '';
+      }
+      if (field === 'mainAccount') {
+        newFilters.subAccount = '';
+      }
+      return newFilters;
+    });
   };
 
   const refreshData = () => {
@@ -587,13 +581,16 @@ const LedgerSummary: React.FC = () => {
     toast.success('Summary exported successfully!');
   };
 
-  const printSummary = () => {
+  const handleRealPrint = () => {
     // Create a print-friendly version
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       toast.error('Please allow popups to print');
       return;
     }
+
+    const fromFormatted = format(new Date(filters.fromDate), 'dd/MM/yyyy');
+    const toFormatted = format(new Date(filters.toDate), 'dd/MM/yyyy');
 
     const currentData = getCurrentData();
     const title =
@@ -623,7 +620,7 @@ const LedgerSummary: React.FC = () => {
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Ledger Summary - ${title}</title>
+          <title></title>
           <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             .header { text-align: center; margin-bottom: 30px; }
@@ -652,6 +649,10 @@ const LedgerSummary: React.FC = () => {
             @media print {
               body { margin: 0; }
               .no-print { display: none; }
+              @page {
+                size: auto;
+                margin: 10mm 15mm;
+              }
             }
           </style>
         </head>
@@ -660,8 +661,7 @@ const LedgerSummary: React.FC = () => {
             <h1>Thirumala Group</h1>
             <h2>Ledger Summary Report</h2>
             <div class="company-name">${filters.companyName || 'All Companies'}</div>
-            <div class="date-time">Generated on ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}</div>
-            ${filters.betweenDates ? `<div class="period">Period: <span class="from-date">${filters.fromDate}</span> to ${filters.toDate}</div>` : ''}
+            <div class="period">Period: <strong>${fromFormatted}</strong> to <strong>${toFormatted}</strong></div>
           </div>
 
           <div class="totals-section">
@@ -783,6 +783,7 @@ ${Math.abs(balance).toLocaleString()}
 
           <div class="footer">
             <p>Generated by Thirumala Group Business Management System</p>
+            <p style="margin-top: 5px; font-weight: 500;">Generated on: ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}</p>
           </div>
         </body>
       </html>
@@ -801,17 +802,67 @@ ${Math.abs(balance).toLocaleString()}
     toast.success('Print dialog opened');
   };
 
+  const printSummary = () => {
+    setShowPrintPreview(true);
+  };
+
   const getCurrentData = () => {
+    let data: any[] = [];
     switch (activeTab) {
       case 'company':
-        return companySummaries;
+        data = companySummaries;
+        break;
       case 'mainAccount':
-        return mainAccountSummaries;
+        data = mainAccountSummaries;
+        break;
       case 'subAccount':
-        return subAccountSummaries;
+        data = subAccountSummaries;
+        break;
       default:
-        return [];
+        data = [];
     }
+
+    if (!searchTerm.trim()) {
+      return data;
+    }
+
+    const searchLower = searchTerm.toLowerCase().trim();
+
+    return data.filter(item => {
+      const creditStr = item.totalCredit !== undefined ? String(item.totalCredit) : String(item.credit || 0);
+      const debitStr = item.totalDebit !== undefined ? String(item.totalDebit) : String(item.debit || 0);
+      const balanceStr = item.balance !== undefined ? String(item.balance) : '';
+
+      if (activeTab === 'company') {
+        const company = item as CompanySummary;
+        return (
+          company.companyName.toLowerCase().includes(searchLower) ||
+          creditStr.includes(searchLower) ||
+          debitStr.includes(searchLower) ||
+          balanceStr.includes(searchLower)
+        );
+      } else if (activeTab === 'mainAccount') {
+        const account = item as AccountSummary & { companyName?: string };
+        return (
+          account.accountName.toLowerCase().includes(searchLower) ||
+          (account.companyName || '').toLowerCase().includes(searchLower) ||
+          creditStr.includes(searchLower) ||
+          debitStr.includes(searchLower) ||
+          balanceStr.includes(searchLower)
+        );
+      } else if (activeTab === 'subAccount') {
+        const subAccount = item as SubAccountSummary;
+        return (
+          subAccount.subAccount.toLowerCase().includes(searchLower) ||
+          subAccount.mainAccount.toLowerCase().includes(searchLower) ||
+          (subAccount.companyName || '').toLowerCase().includes(searchLower) ||
+          creditStr.includes(searchLower) ||
+          debitStr.includes(searchLower) ||
+          balanceStr.includes(searchLower)
+        );
+      }
+      return false;
+    });
   };
 
   const renderSummaryTable = () => {
@@ -838,7 +889,7 @@ ${Math.abs(balance).toLocaleString()}
               </tr>
             </thead>
             <tbody>
-              {companySummaries.map((company, index) => (
+              {data.map((company, index) => (
                 <tr
                   key={company.companyName}
                   className={`border-b hover:bg-gray-50 ${
@@ -896,7 +947,7 @@ ${Math.abs(balance).toLocaleString()}
               </tr>
             </thead>
             <tbody>
-              {mainAccountSummaries.map((account, index) => (
+              {data.map((account, index) => (
                 <tr
                   key={!filters.companyName && (account as any).companyName 
                     ? `${(account as any).companyName}-${account.accountName}-${index}`
@@ -964,7 +1015,7 @@ ${Math.abs(balance).toLocaleString()}
               </tr>
             </thead>
             <tbody>
-              {subAccountSummaries.map((subAccount, index) => (
+              {data.map((subAccount, index) => (
                 <tr
                   key={`${subAccount.companyName || ''}-${subAccount.subAccount}-${index}`}
                   className={`border-b hover:bg-gray-50 ${
@@ -1008,6 +1059,27 @@ ${Math.abs(balance).toLocaleString()}
 
     return null;
   };
+
+  const currentDataForPreview = getCurrentData();
+  const fromFormattedForPreview = filters.fromDate ? format(new Date(filters.fromDate), 'dd/MM/yyyy') : '';
+  const toFormattedForPreview = filters.toDate ? format(new Date(filters.toDate), 'dd/MM/yyyy') : '';
+  
+  const previewTotals = useMemo(() => {
+    return currentDataForPreview.reduce((acc, item) => {
+      const credit = activeTab === 'company' ? (item as CompanySummary).totalCredit : 
+                    (item as AccountSummary | SubAccountSummary).credit;
+      const debit = activeTab === 'company' ? (item as CompanySummary).totalDebit : 
+                   (item as AccountSummary | SubAccountSummary).debit;
+      const balance = item.balance;
+      
+      acc.totalCredit += credit;
+      acc.totalDebit += debit;
+      acc.totalBalance += balance;
+      acc.recordCount += 1;
+      
+      return acc;
+    }, { totalCredit: 0, totalDebit: 0, totalBalance: 0, recordCount: 0 });
+  }, [currentDataForPreview, activeTab]);
 
   return (
     <div className='space-y-6'>
@@ -1154,7 +1226,7 @@ ${Math.abs(balance).toLocaleString()}
               label='Company Name'
               value={filters.companyName}
               onChange={value => handleFilterChange('companyName', value)}
-              options={companies}
+              options={companyOptions}
               placeholder='Search company...'
             />
 
@@ -1162,7 +1234,7 @@ ${Math.abs(balance).toLocaleString()}
               label='Main Account'
               value={filters.mainAccount}
               onChange={value => handleFilterChange('mainAccount', value)}
-              options={accounts}
+              options={accountOptions}
               placeholder='Search main account...'
             />
 
@@ -1170,7 +1242,7 @@ ${Math.abs(balance).toLocaleString()}
               label='Sub Account'
               value={filters.subAccount}
               onChange={value => handleFilterChange('subAccount', value)}
-              options={subAccounts}
+              options={subAccountOptions}
               placeholder='Search sub account...'
             />
 
@@ -1178,7 +1250,7 @@ ${Math.abs(balance).toLocaleString()}
               label='Staff'
               value={filters.staff}
               onChange={value => handleFilterChange('staff', value)}
-              options={staffList}
+              options={staffOptions}
               placeholder='Search staff...'
             />
           </div>
@@ -1208,6 +1280,25 @@ ${Math.abs(balance).toLocaleString()}
             </Button>
           </div>
           */}
+        </div>
+      </Card>
+
+      {/* Search Bar */}
+      <Card className='bg-gray-50'>
+        <div className='flex items-center gap-4'>
+          <div className='relative flex-1'>
+            <Search className='w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400' />
+            <input
+              type='text'
+              placeholder='Search in summary entries...'
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className='pl-10 pr-4 py-2 w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500'
+            />
+          </div>
+          <div className='text-sm text-gray-600 bg-white px-3 py-2 rounded-lg border'>
+            <strong>{getCurrentData().length}</strong> records found
+          </div>
         </div>
       </Card>
 
@@ -1340,6 +1431,151 @@ ${Math.abs(balance).toLocaleString()}
           )}
         </div>
       </Card>
+
+      {/* Print Preview Modal */}
+      {showPrintPreview && (
+        <div className='fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50'>
+          <div className='bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto'>
+            <div className='p-6'>
+              <div className='flex items-center justify-between mb-6 no-print'>
+                <h3 className='text-lg font-semibold'>
+                  Print Preview - Ledger Summary
+                </h3>
+                <div className='flex items-center gap-2'>
+                  <Button 
+                    size='sm' 
+                    onClick={handleRealPrint}
+                  >
+                    Print
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    onClick={() => setShowPrintPreview(false)}
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+
+              {/* On-screen preview container */}
+              <div className='border p-8 bg-white max-w-4xl mx-auto shadow-sm text-gray-800' style={{ fontFamily: 'Arial, sans-serif' }}>
+                {/* Header */}
+                <div className='text-center border-b-2 border-black pb-4 mb-6'>
+                  <h1 className='text-2xl font-bold uppercase'>Thirumala Group</h1>
+                  <h2 className='text-lg font-semibold mt-1'>Ledger Summary Report</h2>
+                  <div className='text-md font-bold mt-1'>{filters.companyName || 'All Companies'}</div>
+                  <div className='text-sm mt-1'>Period: <strong>{fromFormattedForPreview}</strong> to <strong>{toFormattedForPreview}</strong></div>
+                </div>
+
+                {/* Summary Totals Section */}
+                <div className='border-2 border-gray-200 bg-gray-50 rounded-lg p-4 mb-6'>
+                  <div className='text-md font-bold text-center mb-3'>Summary Totals</div>
+                  <div className='grid grid-cols-2 md:grid-cols-4 gap-4'>
+                    <div className='bg-white p-3 rounded border text-center'>
+                      <div className='text-xs text-gray-500 mb-1'>Total Credit</div>
+                      <div className='text-lg font-bold text-green-600'>{previewTotals.totalCredit.toLocaleString()}</div>
+                    </div>
+                    <div className='bg-white p-3 rounded border text-center'>
+                      <div className='text-xs text-gray-500 mb-1'>Total Debit</div>
+                      <div className='text-lg font-bold text-red-600'>{previewTotals.totalDebit.toLocaleString()}</div>
+                    </div>
+                    <div className='bg-white p-3 rounded border text-center'>
+                      <div className='text-xs text-gray-500 mb-1'>Net Balance</div>
+                      <div className='text-lg font-bold'>{Math.abs(previewTotals.totalBalance).toLocaleString()} {previewTotals.totalBalance >= 0 ? 'CR' : 'DR'}</div>
+                    </div>
+                    <div className='bg-white p-3 rounded border text-center'>
+                      <div className='text-xs text-gray-500 mb-1'>Total Records</div>
+                      <div className='text-lg font-bold'>{previewTotals.recordCount}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Table */}
+                <table className='w-full border-collapse border border-black text-sm mb-6'>
+                  <thead>
+                    <tr className='bg-gray-100 border border-black'>
+                      {activeTab === 'subAccount' ? (
+                        <>
+                          {!filters.companyName && <th className='border border-black p-2 text-left font-bold'>Company Name</th>}
+                          <th className='border border-black p-2 text-left font-bold'>Main Account</th>
+                          <th className='border border-black p-2 text-left font-bold'>Sub Account</th>
+                        </>
+                      ) : activeTab === 'company' ? (
+                        <th className='border border-black p-2 text-left font-bold'>Company Name</th>
+                      ) : (
+                        <>
+                          {!filters.companyName && <th className='border border-black p-2 text-left font-bold'>Company Name</th>}
+                          <th className='border border-black p-2 text-left font-bold'>Main Account</th>
+                        </>
+                      )}
+                      <th className='border border-black p-2 text-right font-bold'>Credit</th>
+                      <th className='border border-black p-2 text-right font-bold'>Debit</th>
+                      <th className='border border-black p-2 text-right font-bold'>Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentDataForPreview.map((item, idx) => {
+                      const credit = activeTab === 'company' ? (item as CompanySummary).totalCredit : 
+                                    (item as AccountSummary | SubAccountSummary).credit;
+                      const debit = activeTab === 'company' ? (item as CompanySummary).totalDebit : 
+                                   (item as AccountSummary | SubAccountSummary).debit;
+                      const balance = item.balance;
+
+                      if (activeTab === 'subAccount') {
+                        const subAccount = item as SubAccountSummary;
+                        return (
+                          <tr key={idx} className='border border-black'>
+                            {!filters.companyName && <td className='border border-black p-2'>{subAccount.companyName}</td>}
+                            <td className='border border-black p-2'>{subAccount.mainAccount || '-'}</td>
+                            <td className='border border-black p-2'>{subAccount.subAccount}</td>
+                            <td className='border border-black p-2 text-right text-green-700 font-medium'>{credit.toLocaleString()}</td>
+                            <td className='border border-black p-2 text-right text-red-700 font-medium'>{debit.toLocaleString()}</td>
+                            <td className={`border border-black p-2 text-right font-semibold ${balance >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                              {Math.abs(balance).toLocaleString()} {balance >= 0 ? 'CR' : 'DR'}
+                            </td>
+                          </tr>
+                        );
+                      } else if (activeTab === 'company') {
+                        const company = item as CompanySummary;
+                        return (
+                          <tr key={idx} className='border border-black'>
+                            <td className='border border-black p-2'>{company.companyName}</td>
+                            <td className='border border-black p-2 text-right text-green-700 font-medium'>{credit.toLocaleString()}</td>
+                            <td className='border border-black p-2 text-right text-red-700 font-medium'>{debit.toLocaleString()}</td>
+                            <td className={`border border-black p-2 text-right font-semibold ${balance >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                              {Math.abs(balance).toLocaleString()} {balance >= 0 ? 'CR' : 'DR'}
+                            </td>
+                          </tr>
+                        );
+                      } else {
+                        const account = item as AccountSummary;
+                        return (
+                          <tr key={idx} className='border border-black'>
+                            {!filters.companyName && <td className='border border-black p-2'>{(account as any).companyName || ''}</td>}
+                            <td className='border border-black p-2'>{account.accountName}</td>
+                            <td className='border border-black p-2 text-right text-green-700 font-medium'>{credit.toLocaleString()}</td>
+                            <td className='border border-black p-2 text-right text-red-700 font-medium'>{debit.toLocaleString()}</td>
+                            <td className={`border border-black p-2 text-right font-semibold ${balance >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                              {Math.abs(balance).toLocaleString()} {balance >= 0 ? 'CR' : 'DR'}
+                            </td>
+                          </tr>
+                        );
+                      }
+                    })}
+                  </tbody>
+                </table>
+
+                {/* Footer */}
+                <div className='text-center border-t border-black pt-4 mt-6 text-xs text-gray-500'>
+                  <p>Generated by Thirumala Group Business Management System</p>
+                  <p className='mt-1 font-semibold'>Generated on: {format(new Date(), 'dd/MM/yyyy HH:mm:ss')}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

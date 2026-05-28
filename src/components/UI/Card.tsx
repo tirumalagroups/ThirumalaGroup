@@ -3,8 +3,8 @@ import React from 'react';
 interface CardProps {
   children: React.ReactNode;
   className?: string;
-  title?: string;
-  subtitle?: string;
+  title?: React.ReactNode;
+  subtitle?: React.ReactNode;
 }
 
 const Card: React.FC<CardProps> = ({

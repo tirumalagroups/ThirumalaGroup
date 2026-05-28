@@ -3,11 +3,10 @@ import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
 import Select from '../components/UI/Select';
-import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
-import { format, differenceInDays, parseISO } from 'date-fns';
+import { format, differenceInDays } from 'date-fns';
 import { BankGuarantee } from '../lib/supabaseDatabase';
 import { supabaseDB } from '../lib/supabaseDatabase';
 import {
@@ -22,7 +21,7 @@ import {
 } from 'lucide-react';
 
 const BankGuarantees: React.FC = () => {
-  const { user } = useAuth();
+  const { mode: tableMode } = useTableMode();
   const [bankGuarantees, setBankGuarantees] = useState<BankGuarantee[]>([]);
   const [filteredBGs, setFilteredBGs] = useState<BankGuarantee[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -49,6 +48,7 @@ const BankGuarantees: React.FC = () => {
     credit: 0,
     debit: 0,
     department: '',
+    cancelled: false,
   });
 
   // Summary stats
@@ -65,7 +65,7 @@ const BankGuarantees: React.FC = () => {
   useEffect(() => {
     loadBankGuarantees();
     loadCustomDepartments();
-  }, []);
+  }, [tableMode]);
 
   useEffect(() => {
     applyFilters();
@@ -271,6 +271,7 @@ const BankGuarantees: React.FC = () => {
             credit: 0,
             debit: 0,
             department: '',
+            cancelled: false,
           });
           setShowAddForm(false);
           toast.success('Bank guarantee added successfully!');
@@ -376,6 +377,9 @@ const BankGuarantees: React.FC = () => {
           <Button variant='secondary' onClick={loadBankGuarantees}>
             Refresh
           </Button>
+          <Button variant='secondary' onClick={exportToExcel}>
+            Export
+          </Button>
           <Button
             onClick={() => {
               setShowAddForm(!showAddForm);
@@ -436,27 +440,7 @@ const BankGuarantees: React.FC = () => {
 
       {/* Filters */}
       <Card className='bg-gradient-to-r from-gray-50 to-blue-50 border-gray-200'>
-        <div className='grid grid-cols-1 md:grid-cols-4 gap-4'>
-          <div className='flex flex-col justify-end'>
-            <label
-              htmlFor='bg-search'
-              className='text-sm font-medium text-gray-700 mb-1'
-            >
-              Search
-            </label>
-            <div className='relative'>
-              <Search className='w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400' />
-              <input
-                id='bg-search'
-                type='text'
-                placeholder='Search BGs...'
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className='pl-10 pr-4 h-12 w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base'
-              />
-            </div>
-          </div>
-
+        <div className='grid grid-cols-1 md:grid-cols-5 gap-4'>
           <Select
             label='Department'
             value={filters.department}
@@ -487,6 +471,26 @@ const BankGuarantees: React.FC = () => {
               <strong>{filteredBGs.length}</strong> BGs found
             </div>
           </div>
+
+          <div className='flex flex-col justify-end'>
+            <label
+              htmlFor='bg-search'
+              className='text-sm font-medium text-gray-700 mb-1'
+            >
+              Search
+            </label>
+            <div className='relative'>
+              <Search className='w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400' />
+              <input
+                id='bg-search'
+                type='text'
+                placeholder='Search BGs...'
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className='pl-10 pr-4 h-12 w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base'
+              />
+            </div>
+          </div>
         </div>
       </Card>
 
@@ -494,7 +498,20 @@ const BankGuarantees: React.FC = () => {
       {(showAddForm || editingBG) && (
         <Card
           title={
-            editingBG ? 'Edit Bank Guarantee' : 'New Bank Guarantee Entry Form'
+            <div className='flex items-center gap-3'>
+              <span>{editingBG ? 'Edit Bank Guarantee' : 'New Bank Guarantee Entry Form'}</span>
+              {(() => {
+                const count = bankGuarantees.filter(
+                  bg => !bg.cancelled && getExpiryStatus(bg.exp_date).status === 'expiring'
+                ).length;
+                return count > 0 ? (
+                  <span className='inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700 border border-orange-300'>
+                    <AlertTriangle className='w-3 h-3' />
+                    BG expiry due: {count}
+                  </span>
+                ) : null;
+              })()}
+            </div>
           }
         >
           <form onSubmit={handleSubmit} className='space-y-4'>

@@ -1,25 +1,25 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
-import { supabaseDB } from '../lib/supabaseDatabase';
+// import { supabaseDB } from '../lib/supabaseDatabase';
 import { supabase } from '../lib/supabase';
 import { getTableName } from '../lib/tableNames';
 import { useAuth } from '../contexts/AuthContext';
-import { useTableMode } from '../contexts/TableModeContext';
+// import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import { format } from 'date-fns';
-import { importFromFile, validateImportedData } from '../utils/excel';
+import { importFromFile } from '../utils/excel';
 import { Upload, FileText, CheckCircle, AlertCircle } from 'lucide-react';
 
 // Helper functions - Memoized for better performance
-const sanitizeString = (value: any): string => {
+const sanitizeString = (value: unknown): string => {
   if (value === null || value === undefined || value === '') return '';
   const str = String(value).trim();
   return str === '' ? '' : str;
 };
 
-const sanitizeNumber = (value: any): number => {
+const sanitizeNumber = (value: unknown): number => {
   if (value === null || value === undefined || value === '') return 0;
   const num = parseFloat(String(value).replace(/[^\d.-]/g, ''));
   return isNaN(num) ? 0 : num;
@@ -54,129 +54,20 @@ const parseDateToDBFormat = (dateString: string): string => {
   }
 };
 
-// Helper function to validate companies exist in the database
-const validateCompaniesExist = async (
-  companies: string[]
-): Promise<Set<string>> => {
-  try {
-    const { data: existingCompanies, error } = await supabase
-      .from('company')
-      .select('company_name')
-      .in('company_name', companies);
 
-    if (error) {
-      console.error('Error checking existing companies:', error);
-      return new Set();
-    }
 
-    return new Set(existingCompanies?.map(c => c.company_name) || []);
-  } catch (error) {
-    console.error('Error validating companies:', error);
-    return new Set();
-  }
-};
 
-// Helper function to ensure batch dependencies (companies, accounts, sub-accounts)
-const ensureBatchDependencies = async (batchEntries: any[]) => {
-  try {
-    // Collect unique companies, accounts, and sub-accounts
-    const companies = new Set();
-    const accounts = new Set();
-    const subAccounts = new Set();
-
-    batchEntries.forEach(entry => {
-      if (entry.company_name) {
-        companies.add(
-          JSON.stringify({
-            company: entry.company_name,
-            address: entry.address || '',
-          })
-        );
-      }
-      if (entry.company_name && entry.acc_name) {
-        accounts.add(
-          JSON.stringify({
-            company: entry.company_name,
-            account: entry.acc_name,
-          })
-        );
-      }
-      if (entry.company_name && entry.acc_name && entry.sub_acc_name) {
-        subAccounts.add(
-          JSON.stringify({
-            company: entry.company_name,
-            account: entry.acc_name,
-            subAccount: entry.sub_acc_name,
-          })
-        );
-      }
-    });
-
-    // Bulk create companies
-    const companyPromises = Array.from(companies).map(async companyStr => {
-      const { company, address } = JSON.parse(companyStr as string);
-      try {
-        await supabaseDB.addCompany(company, address);
-      } catch (error) {
-        // Company might already exist, which is fine
-        console.log(`Company ${company} already exists or error:`, error);
-      }
-    });
-
-    // Bulk create accounts
-    const accountPromises = Array.from(accounts).map(async accountStr => {
-      const { company, account } = JSON.parse(accountStr as string);
-      try {
-        await supabaseDB.addAccount(company, account);
-      } catch (error) {
-        // Account might already exist, which is fine
-        console.log(`Account ${account} already exists or error:`, error);
-      }
-    });
-
-    // Bulk create sub-accounts
-    const subAccountPromises = Array.from(subAccounts).map(
-      async subAccountStr => {
-        const { company, account, subAccount } = JSON.parse(
-          subAccountStr as string
-        );
-        try {
-          await supabaseDB.addSubAccount(company, account, subAccount);
-        } catch (error) {
-          // Sub-account might already exist, which is fine
-          console.log(
-            `Sub-account ${subAccount} already exists or error:`,
-            error
-          );
-        }
-      }
-    );
-
-    // Execute all promises in parallel
-    await Promise.all([
-      ...companyPromises,
-      ...accountPromises,
-      ...subAccountPromises,
-    ]);
-    console.log(
-      `Ensured dependencies for batch: ${companies.size} companies, ${accounts.size} accounts, ${subAccounts.size} sub-accounts`
-    );
-  } catch (error) {
-    console.error('Error ensuring batch dependencies:', error);
-    // Don't throw error as this is not critical for the main operation
-  }
-};
 
 // Helper function to process batch individually as fallback
 const processBatchIndividually = async (
-  batch: any[],
+  batch: unknown[],
   startIndex: number,
   errors: string[],
   successCount: number,
   errorCount: number,
   parsedDates: number,
   fallbackDates: number,
-  currentUser: any
+  currentUser: { username?: string } | null
 ) => {
   console.log('Processing batch individually as fallback...');
 
@@ -465,7 +356,6 @@ const processBatchIndividually = async (
       }
 
       // Handle date validation
-      const originalDate = cleanEntry.c_date;
       if (
         !cleanEntry.c_date ||
         cleanEntry.c_date === '' ||
@@ -508,7 +398,7 @@ const processBatchIndividually = async (
       // This ensures data integrity by only allowing existing companies
 
       // Insert individual entry
-      const { data: result, error: insertError } = await supabase
+      const { error: insertError } = await supabase
         .from(getTableName('cash_book'))
         .insert(entryData)
         .select()
@@ -531,7 +421,7 @@ const processBatchIndividually = async (
   }
 };
 
-const sanitizeDate = (value: any): string => {
+const sanitizeDate = (value: unknown): string => {
   // If value is null, undefined, or empty string, return empty string
   // (this will trigger fallback to today's date in the main processing logic)
   if (!value || value === '') return '';
@@ -548,37 +438,15 @@ const sanitizeDate = (value: any): string => {
         return format(date, 'yyyy-MM-dd HH:mm:ss');
       }
 
-      // Try parsing common date formats with more robust parsing
-      const dateFormats = [
-        'yyyy-MM-dd',
-        'dd/MM/yyyy',
-        'MM/dd/yyyy',
-        'dd-MM-yyyy',
-        'MM-dd-yyyy',
-        'yyyy/MM/dd',
-        'dd.MM.yyyy',
-        'MM.dd.yyyy',
-        'dd/MM/yy',
-        'MM/dd/yy',
-        'dd-MM-yy',
-        'MM-dd-yy',
-        'yyyy-MM-dd HH:mm:ss',
-        'dd/MM/yyyy HH:mm:ss',
-        'MM/dd/yyyy HH:mm:ss',
-      ];
-
-      // Try parsing with different approaches
-      for (const formatStr of dateFormats) {
-        try {
-          // For formats with time, try parsing without time first
-          const dateOnly = trimmedValue.split(' ')[0];
-          const parsedDate = new Date(dateOnly);
-          if (!isNaN(parsedDate.getTime())) {
-            return format(parsedDate, 'yyyy-MM-dd HH:mm:ss');
-          }
-        } catch {
-          continue;
+      // Try parsing common date formats by parsing date without time first
+      try {
+        const dateOnly = trimmedValue.split(' ')[0];
+        const parsedDate = new Date(dateOnly);
+        if (!isNaN(parsedDate.getTime())) {
+          return format(parsedDate, 'yyyy-MM-dd HH:mm:ss');
         }
+      } catch {
+        // Fall through
       }
 
       // Try Excel date serial number conversion (Excel stores dates as numbers)
@@ -621,9 +489,10 @@ const sanitizeDate = (value: any): string => {
 };
 
 const getFieldValue = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   row: any,
   possibleNames: string[],
-  defaultValue: any
+  defaultValue: unknown
 ) => {
   for (const name of possibleNames) {
     if (row[name] !== undefined && row[name] !== null && row[name] !== '') {
@@ -634,6 +503,7 @@ const getFieldValue = (
 };
 
 // Simplified validation function that's more lenient
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const validateEntry = (entry: any) => {
   const errors: string[] = [];
 
@@ -664,9 +534,8 @@ const CsvUpload: React.FC = () => {
   const { user } = useAuth();
 
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [uploadPreview, setUploadPreview] = useState<any[]>([]);
+  const [uploadPreview, setUploadPreview] = useState<Record<string, unknown>[]>([]);
   const [uploadLoading, setUploadLoading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
   const [importProgress, setImportProgress] = useState({
     current: 0,
     total: 0,
@@ -694,14 +563,6 @@ const CsvUpload: React.FC = () => {
   } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  // Memoized values for better performance
-  const isImporting = useMemo(() => uploadLoading, [uploadLoading]);
-  const hasResults = useMemo(() => importResults !== null, [importResults]);
-  const canUpload = useMemo(
-    () => !uploadLoading && uploadedFile === null,
-    [uploadLoading, uploadedFile]
-  );
-
   const handleFileUpload = async (file: File) => {
     if (!file.name.endsWith('.csv')) {
       toast.error('Please upload a CSV file');
@@ -710,7 +571,6 @@ const CsvUpload: React.FC = () => {
 
     setUploadedFile(file);
     setUploadLoading(true);
-    setUploadProgress(0);
     setImportResults(null);
 
     try {
@@ -734,7 +594,6 @@ const CsvUpload: React.FC = () => {
       toast.error('Failed to upload CSV file');
     } finally {
       setUploadLoading(false);
-      setUploadProgress(100);
     }
   };
 
@@ -774,7 +633,6 @@ const CsvUpload: React.FC = () => {
     }
 
     setUploadLoading(true);
-    setUploadProgress(0);
     setImportResults(null);
 
     // COMPREHENSIVE FOREIGN KEY CONSTRAINT DISABLING
@@ -828,7 +686,7 @@ const CsvUpload: React.FC = () => {
 
     // Test database connection
     try {
-      const { data: testData, error: testError } = await supabase
+      const { error: testError } = await supabase
         .from(getTableName('cash_book'))
         .select('id')
         .limit(1);
@@ -1093,19 +951,9 @@ const CsvUpload: React.FC = () => {
                         const [day, month, year] = dateStr.split('/');
                         parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
                       }
-                      // Check for MM/DD/YYYY format
-                      else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
-                        const [month, day, year] = dateStr.split('/');
-                        parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-                      }
                       // Check for DD-MM-YYYY format
                       else if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(dateStr)) {
                         const [day, month, year] = dateStr.split('-');
-                        parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-                      }
-                      // Check for MM-DD-YYYY format
-                      else if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(dateStr)) {
-                        const [month, day, year] = dateStr.split('-');
                         parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
                       }
                       // Try default Date constructor as fallback
@@ -1453,6 +1301,7 @@ const CsvUpload: React.FC = () => {
               );
 
               let insertSuccess = false;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               let finalResult: any = null;
 
               // Method 1: Try bulk insert with original data
@@ -1782,7 +1631,6 @@ const CsvUpload: React.FC = () => {
   const resetUpload = () => {
     setUploadedFile(null);
     setUploadPreview([]);
-    setUploadProgress(0);
     setImportResults(null);
     setIsDragOver(false);
   };
@@ -1833,6 +1681,7 @@ const CsvUpload: React.FC = () => {
             if (!isNaN(parsed.getTime())) {
               return parsed.toISOString().slice(0, 19).replace('T', ' ');
             }
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
           } catch (error) {
             console.warn(`Could not parse date: ${testDate}, using NOW()`);
           }
@@ -1891,7 +1740,7 @@ const CsvUpload: React.FC = () => {
       }
 
       // Test Supabase client
-      const { data, error } = await supabase.from(getTableName('cash_book')).select('count');
+      const { error } = await supabase.from(getTableName('cash_book')).select('count');
       if (error) {
         console.error('❌ Database connection failed:', error);
         toast.error('Database connection failed: ' + error.message);
@@ -1953,7 +1802,7 @@ const CsvUpload: React.FC = () => {
 
       // Check if any tables have RLS enabled
       const tablesWithRLS =
-        rlsStatus?.filter((table: any) => table.rls_enabled) || [];
+        rlsStatus?.filter((table: { rls_enabled?: boolean }) => table.rls_enabled) || [];
 
       if (tablesWithRLS.length > 0) {
         console.log('🔒 Tables with RLS enabled:', tablesWithRLS);
@@ -2025,7 +1874,7 @@ const CsvUpload: React.FC = () => {
   };
 
   // Fallback function to save data locally if Supabase fails
-  const saveToLocalStorage = (data: any[]) => {
+  const saveToLocalStorage = (data: unknown[]) => {
     try {
       const existingData = JSON.parse(
         localStorage.getItem('csv_upload_data') || '[]'
@@ -2095,7 +1944,7 @@ const CsvUpload: React.FC = () => {
       toast.success(`Starting sync of ${offlineData.length} entries...`);
 
       // Test connection first
-      const { data, error } = await supabase.from(getTableName('cash_book')).select('count');
+      const { error } = await supabase.from(getTableName('cash_book')).select('count');
       if (error) {
         toast.error('Connection still unavailable. Cannot sync.');
         return;
@@ -2437,7 +2286,7 @@ const CsvUpload: React.FC = () => {
                             key={index}
                             className='border-b border-gray-100 hover:bg-gray-50'
                           >
-                            {Object.values(row).map((value: any, cellIndex) => (
+                            {Object.values(row).map((value: unknown, cellIndex) => (
                               <td key={cellIndex} className='px-3 py-2'>
                                 {String(value)}
                               </td>

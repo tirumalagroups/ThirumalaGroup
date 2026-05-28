@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
-import Select from '../components/UI/Select';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
 import { useAuth } from '../contexts/AuthContext';
@@ -67,8 +66,10 @@ const ApproveRecords: React.FC = () => {
     return `${day}/${month}/${year}`;
   };
 
-  const [entries, setEntries] = useState<any[]>([]);
+  const [allPendingEntries, setAllPendingEntries] = useState<any[]>([]);
+  const [approvedEntries, setApprovedEntries] = useState<any[]>([]);
   const [filteredEntries, setFilteredEntries] = useState<any[]>([]);
+  const [filteredApprovedEntries, setFilteredApprovedEntries] = useState<any[]>([]);
   const [deletedEntries, setDeletedEntries] = useState<any[]>([]);
   const [filteredDeletedEntries, setFilteredDeletedEntries] = useState<any[]>([]);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(
@@ -76,6 +77,7 @@ const ApproveRecords: React.FC = () => {
   );
   const [loading, setLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [approvedPage, setApprovedPage] = useState(1);
   const [recordsPerPage] = useState(50);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [viewOpen, setViewOpen] = useState(false);
@@ -83,22 +85,115 @@ const ApproveRecords: React.FC = () => {
   const [viewEditing, setViewEditing] = useState(false);
   const [viewDraft, setViewDraft] = useState<any | null>(null);
 
-  // Calculate total pages
+  // Derive unique sorted dates containing pending records
+  const pendingDates = useMemo(() => {
+    const dates = [...new Set(allPendingEntries.map(e => e.c_date).filter(Boolean))];
+    return dates.sort();
+  }, [allPendingEntries]);
+
+  // Default filter date to the latest pending date if current date is not in pendingDates
+  useEffect(() => {
+    if (pendingDates.length > 0) {
+      if (!filters.date || !pendingDates.includes(filters.date)) {
+        const latestDate = pendingDates[pendingDates.length - 1];
+        setFilters(prev => ({ ...prev, date: latestDate }));
+      }
+    } else {
+      if (!filters.date) {
+        setFilters(prev => ({ ...prev, date: format(new Date(), 'yyyy-MM-dd') }));
+      }
+    }
+  }, [pendingDates]);
+
+  // Pending entries for the selected date
+  const pendingEntriesForDate = useMemo(() => {
+    return allPendingEntries.filter(entry => entry.c_date === filters.date);
+  }, [allPendingEntries, filters.date]);
+
+  // Derived filters based only on pending records for the selected date
+  const companyOptions = useMemo(() => {
+    const distinctCompanies = [...new Set(pendingEntriesForDate.map(e => e.company_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Companies' },
+      ...distinctCompanies.map(name => ({ value: name, label: name }))
+    ];
+  }, [pendingEntriesForDate]);
+
+  const accountOptions = useMemo(() => {
+    let filtered = pendingEntriesForDate;
+    if (filters.company) {
+      filtered = filtered.filter(e => e.company_name === filters.company);
+    }
+    const distinctAccounts = [...new Set(filtered.map(e => e.acc_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Accounts' },
+      ...distinctAccounts.map(name => ({ value: name, label: name }))
+    ];
+  }, [pendingEntriesForDate, filters.company]);
+
+  const subAccountOptions = useMemo(() => {
+    let filtered = pendingEntriesForDate;
+    if (filters.company) {
+      filtered = filtered.filter(e => e.company_name === filters.company);
+    }
+    if (filters.mainAccount) {
+      filtered = filtered.filter(e => e.acc_name === filters.mainAccount);
+    }
+    const distinctSubAccounts = [...new Set(filtered.map(e => e.sub_acc_name).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Sub Accounts' },
+      ...distinctSubAccounts.map(name => ({ value: name, label: name }))
+    ];
+  }, [pendingEntriesForDate, filters.company, filters.mainAccount]);
+
+  const staffOptions = useMemo(() => {
+    let filtered = pendingEntriesForDate;
+    if (filters.company) {
+      filtered = filtered.filter(e => e.company_name === filters.company);
+    }
+    if (filters.mainAccount) {
+      filtered = filtered.filter(e => e.acc_name === filters.mainAccount);
+    }
+    if (filters.subAccount) {
+      filtered = filtered.filter(e => e.sub_acc_name === filters.subAccount);
+    }
+    const distinctStaff = [...new Set(filtered.map(e => e.staff).filter(Boolean))].sort();
+    return [
+      { value: '', label: 'All Staff' },
+      ...distinctStaff.map(name => ({ value: name, label: name }))
+    ];
+  }, [pendingEntriesForDate, filters.company, filters.mainAccount, filters.subAccount]);
+
+  // Validate and auto-reset filters when options change
+  useEffect(() => {
+    if (filters.company && !companyOptions.some(o => o.value === filters.company)) {
+      handleFilterChange('company', '');
+    }
+  }, [companyOptions, filters.company]);
+
+  useEffect(() => {
+    if (filters.mainAccount && !accountOptions.some(o => o.value === filters.mainAccount)) {
+      handleFilterChange('mainAccount', '');
+    }
+  }, [accountOptions, filters.mainAccount]);
+
+  useEffect(() => {
+    if (filters.subAccount && !subAccountOptions.some(o => o.value === filters.subAccount)) {
+      handleFilterChange('subAccount', '');
+    }
+  }, [subAccountOptions, filters.subAccount]);
+
+  useEffect(() => {
+    if (filters.staff && !staffOptions.some(o => o.value === filters.staff)) {
+      handleFilterChange('staff', '');
+    }
+  }, [staffOptions, filters.staff]);
+
+  // Calculate total pages for pending
   const totalPages = Math.ceil(filteredEntries.length / recordsPerPage);
 
-  // Dropdown data
-  const [companies, setCompanies] = useState<
-    { value: string; label: string }[]
-  >([]);
-  const [accounts, setAccounts] = useState<
-    { value: string; label: string }[]
-  >([]);
-  const [subAccounts, setSubAccounts] = useState<
-    { value: string; label: string }[]
-  >([]);
-  const [staffList, setStaffList] = useState<
-    { value: string; label: string }[]
-  >([]);
+  // Calculate total pages for approved
+  const approvedTotalPages = Math.ceil(filteredApprovedEntries.length / recordsPerPage);
 
   // Summary data
   const [summary, setSummary] = useState({
@@ -115,31 +210,63 @@ const ApproveRecords: React.FC = () => {
     pendingDeleted: 0,
   });
 
-  useEffect(() => {
-    console.log('[ApproveRecords] useEffect triggered, isAdmin:', isAdmin, 'user:', user);
-    if (!isAdmin) {
-      console.log('[ApproveRecords] User is not admin, setting access denied error');
-      setFetchError('Access denied. Only admins can approve records.');
-      toast.error('Access denied. Only admins can approve records.');
-      return;
-    }
-    console.log('[ApproveRecords] User is admin, loading data...');
-    loadDropdownData();
-    loadEntries();
-  }, [isAdmin]);
+  const loadEntries = async () => {
+    console.log('[ApproveRecords] loadEntries called');
+    setLoading(true);
+    setFetchError(null);
+    
+    try {
+      console.log('[ApproveRecords] Loading pending entries...');
+      const { data: pendingData, error: pendingError } = await supabase
+        .from(getTableName('cash_book'))
+        .select('*')
+        .or('approved.is.null,approved.eq.false,approved.eq.,approved.eq.false');
+      
+      if (pendingError) {
+        console.error('[ApproveRecords] Error loading pending entries:', pendingError);
+        throw pendingError;
+      }
 
-  // Reload data when table mode changes (ITR/Regular)
+      const activePending = (pendingData || []).filter(e => e.approved !== 'rejected');
+      setAllPendingEntries(activePending);
+
+      let approvedData: any[] = [];
+      if (filters.date) {
+        console.log('[ApproveRecords] Loading approved entries for date:', filters.date);
+        const { data: approvedRes, error: approvedError } = await supabase
+          .from(getTableName('cash_book'))
+          .select('*')
+          .eq('c_date', filters.date)
+          .in('approved', [true, 'true']);
+        
+        if (approvedError) {
+          console.error('[ApproveRecords] Error loading approved entries:', approvedError);
+          throw approvedError;
+        }
+        approvedData = approvedRes || [];
+      }
+      setApprovedEntries(approvedData);
+
+      console.log('[ApproveRecords] Fetching deleted records...');
+      let deleted = await supabaseDB.getDeletedCashBook();
+      setDeletedEntries(deleted || []);
+    } catch (error) {
+      setFetchError('Failed to load entries from the database.');
+      console.error('[ApproveRecords] Error loading entries:', error);
+      toast.error('Failed to load entries');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isAdmin) {
-      console.log('[ApproveRecords] Table mode changed to:', tableMode, '- reloading data...');
-      loadDropdownData();
       loadEntries();
     }
-  }, [tableMode]);
+  }, [isAdmin, tableMode, filters.date]);
 
   useEffect(() => {
     const onRefresh = () => {
-      // Add a small delay to ensure database operations are complete
       setTimeout(() => {
         console.log('[ApproveRecords] Dashboard refresh triggered, reloading entries...');
         loadEntries();
@@ -151,213 +278,60 @@ const ApproveRecords: React.FC = () => {
 
   useEffect(() => {
     applyFilters();
-  }, [entries, filters]);
+  }, [allPendingEntries, approvedEntries, deletedEntries, filters]);
 
   useEffect(() => {
     updateSummary();
-  }, [entries, deletedEntries, filters, selectedEntries]);
+  }, [filteredEntries, filteredApprovedEntries, deletedEntries, selectedEntries]);
 
   // Keep display date in sync with internal filter date
   useEffect(() => {
     setDisplayDate(convertToDisplayFormat(filters.date) || format(new Date(), 'dd/MM/yyyy'));
   }, [filters.date]);
 
-  const loadDropdownData = async () => {
-    try {
-      // Load companies
-      const companies = await supabaseDB.getCompanies();
-      const companiesData = companies.map(company => ({
-        value: company.company_name,
-        label: company.company_name,
-      }));
-      setCompanies([{ value: '', label: 'All Companies' }, ...companiesData]);
-
-      // Load accounts
-      const accountNames = await supabaseDB.getDistinctAccountNames();
-      const accountsData = accountNames.map(accountName => ({
-        value: accountName,
-        label: accountName,
-      }));
-      setAccounts([{ value: '', label: 'All Accounts' }, ...accountsData]);
-
-      // Load sub-accounts
-      const subAccountNames = await supabaseDB.getDistinctSubAccountNames();
-      const subAccountsData = subAccountNames.map(subAccountName => ({
-        value: subAccountName,
-        label: subAccountName,
-      }));
-      setSubAccounts([{ value: '', label: 'All Sub Accounts' }, ...subAccountsData]);
-
-      // Load staff - only show names that have data in cash_book (mode-aware)
-      // getDistinctStaffNames uses getTableName('cash_book') which switches between cash_book and cash_book_itr
-      console.log('[ApproveRecords] Loading staff names for mode:', tableMode);
-      const staffData = await supabaseDB.getDistinctStaffNames();
-      console.log('[ApproveRecords] Loaded staff names - Count:', staffData.length);
-      setStaffList([{ value: '', label: 'All Staff' }, ...staffData]);
-    } catch (error) {
-      setFetchError('Failed to load dropdown data');
-      console.error('Error loading dropdown data:', error);
-      toast.error('Failed to load dropdown data');
-    }
-  };
-
-
-  const loadEntries = async () => {
-    console.log('[ApproveRecords] loadEntries called');
-    setLoading(true);
-    setFetchError(null);
-    
-    try {
-      console.log('[ApproveRecords] Starting to load entries...');
-      // Server-side filtering for speed
-      console.log('[ApproveRecords] Calling getFilteredCashBookEntries with filters:', filters);
-      let { data: allEntries } = await supabaseDB.getFilteredCashBookEntries({
-        companyName: filters.company || undefined,
-      }, 1000, 0);
-      console.log('[ApproveRecords] getFilteredCashBookEntries result:', allEntries);
-      
-      // Fallback to basic fetch if nothing returned (or undefined)
-      if (!allEntries || allEntries.length === 0) {
-        console.log('[ApproveRecords] No entries from filtered query, trying basic fetch...');
-        allEntries = await supabaseDB.getCashBookEntries(1000, 0);
-        console.log('[ApproveRecords] getCashBookEntries result:', allEntries);
-      }
-      console.log('[ApproveRecords] Final fetched entries:', allEntries?.length || 0, 'entries');
-
-      // Debug: Check approval status of entries
-      const pendingEntries = allEntries.filter(
-        entry => {
-          const approved = entry.approved;
-          if (approved === null || approved === undefined) return true;
-          if (typeof approved === 'boolean') return !approved;
-          if (typeof approved === 'string') return approved === '' || approved === 'false';
-          return false;
-        }
-      );
-      console.log('[ApproveRecords] Pending entries:', pendingEntries);
-
-      setEntries(allEntries);
-      // Load deleted records as well
-      console.log('[ApproveRecords] Fetching deleted records...');
-      let deleted = await supabaseDB.getDeletedCashBook();
-      console.log('[ApproveRecords] getDeletedCashBook result:', deleted);
-      
-      // Debug: Check approval status of deleted records
-      if (deleted && deleted.length > 0) {
-        console.log('[ApproveRecords] Deleted records approval status:');
-        deleted.forEach((d, index) => {
-          console.log(`[ApproveRecords] Deleted ${index}: id=${d.id}, approved=${d.approved}, type=${typeof d.approved}`);
-        });
-      }
-      
-      // Fallback: if none, attempt a direct minimal fetch to ensure visibility
-      if (!deleted || deleted.length === 0) {
-        console.log('[ApproveRecords] No deleted records from getDeletedCashBook, trying direct fetch...');
-        try {
-          const { data, error } = await supabase
-            .from(getTableName('deleted_cash_book'))
-            .select('*')
-            .order('deleted_at', { ascending: false })
-            .limit(1000);
-          console.log('[ApproveRecords] Direct fetch result:', { data, error });
-          if (error) {
-            console.error('[ApproveRecords] Direct fetch error:', error);
-            console.error('[ApproveRecords] Error details:', {
-              message: error.message,
-              details: error.details,
-              hint: error.hint,
-              code: error.code
-            });
-          } else if (data) {
-            deleted = data;
-          }
-        } catch (err) {
-          console.error('[ApproveRecords] Exception in direct fetch:', err);
-        }
-      }
-      console.log('[ApproveRecords] Final deleted entries:', deleted);
-      setDeletedEntries(deleted || []);
-      if (!allEntries || allEntries.length === 0) {
-        setFetchError('No entries found in the database.');
-      }
-    } catch (error) {
-      setFetchError('Failed to load entries from the database.');
-      console.error('[ApproveRecords] Error loading entries:', error);
-      toast.error('Failed to load entries');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const applyFilters = () => {
-    let filtered = [...entries];
-    console.log(
-      '[ApproveRecords] Applying filters:',
-      filters,
-      'Entries:',
-      entries
-    );
-
-    // Date filter
-    if (filters.date) {
-      filtered = filtered.filter(entry => entry.c_date === filters.date);
-    }
-
-    // Company filter
+    // 1. Filter pending entries by date and dropdown filters
+    let pending = allPendingEntries.filter(entry => entry.c_date === filters.date);
+    
     if (filters.company) {
-      filtered = filtered.filter(
-        entry => entry.company_name === filters.company
-      );
+      pending = pending.filter(entry => entry.company_name === filters.company);
     }
-
-    // Main Account filter
     if (filters.mainAccount) {
-      filtered = filtered.filter(
-        entry => entry.acc_name === filters.mainAccount
-      );
+      pending = pending.filter(entry => entry.acc_name === filters.mainAccount);
     }
-
-    // Sub Account filter
     if (filters.subAccount) {
-      filtered = filtered.filter(
-        entry => entry.sub_acc_name === filters.subAccount
-      );
+      pending = pending.filter(entry => entry.sub_acc_name === filters.subAccount);
     }
-
-    // Staff filter - match exactly or by partial match
     if (filters.staff) {
-      filtered = filtered.filter(entry => {
+      pending = pending.filter(entry => {
         const entryStaff = entry.staff ? String(entry.staff).trim() : '';
         const filterStaff = String(filters.staff).trim();
         return entryStaff === filterStaff || entryStaff.toLowerCase().includes(filterStaff.toLowerCase());
       });
     }
+    setFilteredEntries(pending);
 
-    // Base set for summary (date/company/staff), regardless of approval state
-    const baseFiltered = filtered;
-
-    // Only show pending records (not approved and not rejected) for main table
-    const pendingFiltered = baseFiltered.filter(entry => {
-      // Check if entry is truly pending (null, undefined, empty string, or 'false' string)
-      // Exclude records that are explicitly approved (true or 'true') or rejected ('rejected')
-      return (
-        entry.approved === null ||
-        entry.approved === undefined ||
-        entry.approved === '' ||
-        entry.approved === 'false' ||
-        entry.approved === false
-      ) && entry.approved !== 'rejected';
-    });
-
-    setFilteredEntries(pendingFiltered);
-    setCurrentPage(1);
-    if (pendingFiltered.length === 0) {
-      setFetchError('No pending records found matching the selected filters.');
-    } else {
-      setFetchError(null);
+    // 2. Filter approved entries by dropdown filters
+    let approved = [...approvedEntries];
+    if (filters.company) {
+      approved = approved.filter(entry => entry.company_name === filters.company);
     }
+    if (filters.mainAccount) {
+      approved = approved.filter(entry => entry.acc_name === filters.mainAccount);
+    }
+    if (filters.subAccount) {
+      approved = approved.filter(entry => entry.sub_acc_name === filters.subAccount);
+    }
+    if (filters.staff) {
+      approved = approved.filter(entry => {
+        const entryStaff = entry.staff ? String(entry.staff).trim() : '';
+        const filterStaff = String(filters.staff).trim();
+        return entryStaff === filterStaff || entryStaff.toLowerCase().includes(filterStaff.toLowerCase());
+      });
+    }
+    setFilteredApprovedEntries(approved);
 
-    // Apply same filters to deleted records
+    // 3. Apply filters to deleted records
     let del = [...deletedEntries];
     if (filters.date) del = del.filter(d => d.c_date === filters.date);
     if (filters.company) del = del.filter(d => d.company_name === filters.company);
@@ -370,22 +344,13 @@ const ApproveRecords: React.FC = () => {
         return entryStaff === filterStaff || entryStaff.toLowerCase().includes(filterStaff.toLowerCase());
       });
     }
-    // Show all deleted records that haven't been approved yet
-    console.log('[ApproveRecords] Filtering deleted records...');
-    console.log('[ApproveRecords] Total deleted records before filtering:', del.length);
     
     const pendingDeleted = del.filter(d => {
-      const isPending = d.approved !== true && 
+      return d.approved !== true && 
         d.approved !== 'true' && 
         d.approved !== 'rejected';
-      console.log(`[ApproveRecords] Deleted record ${d.id}: approved=${d.approved}, type=${typeof d.approved}, isPending=${isPending}`);
-      return isPending;
     });
-    
-    console.log('[ApproveRecords] Filtered deleted entries:', pendingDeleted);
     setFilteredDeletedEntries(pendingDeleted);
-
-    // Summary will be updated by updateSummary function
 
     const totalDeleted = del.length;
     const approvedDeleted = del.filter(d => d.approved === true || d.approved === 'true').length;
@@ -395,47 +360,22 @@ const ApproveRecords: React.FC = () => {
   };
 
   const updateSummary = () => {
-    // Calculate summary from all entries (not just pending ones)
-    let baseFiltered = [...entries];
+    // Total pending on the selected date matching current filters
+    const pendingCount = filteredEntries.length;
     
-    // Apply same filters as in applyFilters
-    if (filters.date) {
-      baseFiltered = baseFiltered.filter(entry => entry.c_date === filters.date);
-    }
-    if (filters.company) {
-      baseFiltered = baseFiltered.filter(entry => entry.company_name === filters.company);
-    }
-    if (filters.mainAccount) {
-      baseFiltered = baseFiltered.filter(entry => entry.acc_name === filters.mainAccount);
-    }
-    if (filters.subAccount) {
-      baseFiltered = baseFiltered.filter(entry => entry.sub_acc_name === filters.subAccount);
-    }
-    if (filters.staff) {
-      baseFiltered = baseFiltered.filter(entry => {
-        const entryStaff = entry.staff ? String(entry.staff).trim() : '';
-        const filterStaff = String(filters.staff).trim();
-        return entryStaff === filterStaff || entryStaff.toLowerCase().includes(filterStaff.toLowerCase());
-      });
-    }
+    // Total approved on the selected date matching current filters
+    const approvedCount = filteredApprovedEntries.length;
+
+    // Total rejected on the selected date
+    const rejectedCount = 0;
     
-    const approvedRecords = baseFiltered.filter(e => e.approved === true || e.approved === 'true').length;
-    const rejectedRecords = baseFiltered.filter(e => e.approved === 'rejected').length;
-    const totalRecords = baseFiltered.length;
-    const pendingRecords = baseFiltered.filter(e => 
-      (e.approved === null || 
-      e.approved === undefined || 
-      e.approved === '' ||
-      e.approved === 'false' ||
-      e.approved === false) && e.approved !== 'rejected'
-    ).length;
     const selectedCount = selectedEntries.size;
     
     setSummary({
-      totalRecords,
-      approvedRecords,
-      rejectedRecords,
-      pendingRecords,
+      totalRecords: pendingCount + approvedCount,
+      approvedRecords: approvedCount,
+      rejectedRecords: rejectedCount,
+      pendingRecords: pendingCount,
       selectedCount
     });
 
@@ -484,49 +424,40 @@ const ApproveRecords: React.FC = () => {
 
   const handleFilterChange = (field: keyof ApprovalFilters, value: any) => {
     setFilters(prev => {
-      // Implement mutual exclusivity: if selecting company, mainAccount, or subAccount,
-      // clear the other two filters
-      if (field === 'company' && value) {
-        return {
-          ...prev,
-          company: value,
-          mainAccount: '', // Clear main account
-          subAccount: '', // Clear sub account
-        };
-      } else if (field === 'mainAccount' && value) {
-        return {
-          ...prev,
-          mainAccount: value,
-          company: '', // Clear company
-          subAccount: '', // Clear sub account
-        };
-      } else if (field === 'subAccount' && value) {
-        return {
-          ...prev,
-          subAccount: value,
-          company: '', // Clear company
-          mainAccount: '', // Clear main account
-        };
-      } else {
-        // For other fields (date, staff, showUnfiltered), update normally
-        return {
-          ...prev,
-          [field]: value,
-        };
+      const updated = {
+        ...prev,
+        [field]: value,
+      };
+      if (field === 'company') {
+        updated.mainAccount = '';
+        updated.subAccount = '';
+      } else if (field === 'mainAccount') {
+        updated.subAccount = '';
       }
+      return updated;
     });
   };
 
   const navigateDate = (direction: 'prev' | 'next') => {
-    const currentDate = new Date(filters.date);
-    const newDate = new Date(currentDate);
-    newDate.setDate(currentDate.getDate() + (direction === 'next' ? 1 : -1));
-    const internal = format(newDate, 'yyyy-MM-dd');
-    setFilters(prev => ({
-      ...prev,
-      date: internal,
-    }));
-    setDisplayDate(convertToDisplayFormat(internal));
+    if (pendingDates.length === 0) return;
+    const currentIndex = pendingDates.indexOf(filters.date);
+    let newIndex = currentIndex;
+    if (direction === 'next') {
+      if (currentIndex < pendingDates.length - 1) {
+        newIndex = currentIndex + 1;
+      }
+    } else {
+      if (currentIndex > 0) {
+        newIndex = currentIndex - 1;
+      }
+    }
+    const newDate = pendingDates[newIndex];
+    if (newDate) {
+      setFilters(prev => ({
+        ...prev,
+        date: newDate,
+      }));
+    }
   };
 
   const handleSelectEntry = (entryId: string) => {
@@ -562,7 +493,6 @@ const ApproveRecords: React.FC = () => {
     try {
       setLoading(true);
       
-      // Directly set approved to true instead of toggling
       const { error } = await supabase
         .from(getTableName('cash_book'))
         .update({
@@ -579,18 +509,50 @@ const ApproveRecords: React.FC = () => {
 
       toast.success('Record approved successfully!');
       
-      // Immediately remove the approved record from the local state
-      setEntries(prev => prev.filter(entry => entry.id !== entryId));
+      // Immediately remove the approved record from local state
+      setAllPendingEntries(prev => prev.filter(entry => entry.id !== entryId));
       
-      // Also reload to get updated data
       await loadEntries();
       
-      // Trigger dashboard refresh
       localStorage.setItem('dashboard-refresh', Date.now().toString());
       window.dispatchEvent(new CustomEvent('dashboard-refresh'));
     } catch (error) {
       console.error('Error approving record:', error);
       toast.error('Error approving record');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancelDirectApprove = async (entryId: string) => {
+    try {
+      setLoading(true);
+      
+      const { error } = await supabase
+        .from(getTableName('cash_book'))
+        .update({
+          approved: '', // reset to pending
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', entryId);
+
+      if (error) {
+        console.error('Error cancelling approval:', error);
+        toast.error('Failed to cancel approval');
+        return;
+      }
+
+      toast.success('Approval cancelled successfully!');
+      
+      setApprovedEntries(prev => prev.filter(entry => entry.id !== entryId));
+      
+      await loadEntries();
+      
+      localStorage.setItem('dashboard-refresh', Date.now().toString());
+      window.dispatchEvent(new CustomEvent('dashboard-refresh'));
+    } catch (error) {
+      console.error('Error cancelling approval:', error);
+      toast.error('Error cancelling approval');
     } finally {
       setLoading(false);
     }
@@ -1086,7 +1048,7 @@ const ApproveRecords: React.FC = () => {
         window.dispatchEvent(new CustomEvent('dashboard-refresh'));
       } else {
         if (skippedCount > 0) {
-          toast.info(`No entries approved. ${skippedCount} entries were skipped.`);
+          toast(`No entries approved. ${skippedCount} entries were skipped.`);
         } else {
           toast.error(`Failed to approve entries. ${errorCount} errors occurred.`);
         }
@@ -1100,10 +1062,8 @@ const ApproveRecords: React.FC = () => {
   };
 
   const cancelApprove = async () => {
-    // Get all approved entries from filtered entries
-    const approvedEntries = filteredEntries.filter(
-      entry => entry.approved === true || entry.approved === 'true'
-    );
+    // Get all approved entries from filtered approved entries
+    const approvedEntries = [...filteredApprovedEntries];
 
     if (approvedEntries.length === 0) {
       toast.error('No approved entries found to cancel');
@@ -1383,6 +1343,12 @@ const ApproveRecords: React.FC = () => {
     return filteredEntries.slice(startIndex, endIndex);
   };
 
+  const getApprovedPageEntries = () => {
+    const startIndex = (approvedPage - 1) * recordsPerPage;
+    const endIndex = startIndex + recordsPerPage;
+    return filteredApprovedEntries.slice(startIndex, endIndex);
+  };
+
 
   if (!isAdmin) {
     return (
@@ -1481,39 +1447,36 @@ const ApproveRecords: React.FC = () => {
             </div>
           </div>
           {/* Company Filter */}
-          <div className={`w-full ${filters.mainAccount || filters.subAccount ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className='w-full'>
             <SearchableSelect
               label='Company'
               value={filters.company}
               onChange={value => handleFilterChange('company', value)}
-              options={companies}
+              options={companyOptions}
               placeholder='Search company...'
               className='w-full'
-              disabled={!!filters.mainAccount || !!filters.subAccount}
             />
           </div>
           {/* Main Account Filter */}
-          <div className={`w-full ${filters.company || filters.subAccount ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className='w-full'>
             <SearchableSelect
               label='Main Account'
               value={filters.mainAccount}
               onChange={value => handleFilterChange('mainAccount', value)}
-              options={accounts}
+              options={accountOptions}
               placeholder='Search main account...'
               className='w-full'
-              disabled={!!filters.company || !!filters.subAccount}
             />
           </div>
           {/* Sub Account Filter */}
-          <div className={`w-full ${filters.company || filters.mainAccount ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className='w-full'>
             <SearchableSelect
               label='Sub Account'
               value={filters.subAccount}
               onChange={value => handleFilterChange('subAccount', value)}
-              options={subAccounts}
+              options={subAccountOptions}
               placeholder='Search sub account...'
               className='w-full'
-              disabled={!!filters.company || !!filters.mainAccount}
             />
           </div>
           {/* Staff Filter */}
@@ -1522,7 +1485,7 @@ const ApproveRecords: React.FC = () => {
               label='Staff'
               value={filters.staff}
               onChange={value => handleFilterChange('staff', value)}
-              options={staffList}
+              options={staffOptions}
               placeholder='Search staff...'
               className='w-full'
             />
@@ -1672,7 +1635,7 @@ const ApproveRecords: React.FC = () => {
       </div>
 
       {/* Records Table */}
-      {!loading && !fetchError && (
+      {!loading && (
         <Card
           title='Records for Approval'
           subtitle={`Showing ${getCurrentPageEntries().length} of ${filteredEntries.length} records`}
@@ -1731,82 +1694,89 @@ const ApproveRecords: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {getCurrentPageEntries().map((entry, index) => (
-                  <tr
-                    key={entry.id}
-                    className={`border-b hover:bg-gray-50 transition-colors ${
-                      entry.approved !== true && entry.approved !== 'true' && entry.approved !== 'rejected'
-                        ? 'bg-orange-50' // Orange background for pending records
-                        : index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
-                    }`}
-                    onClick={e => {
-                      // Don't trigger row click if clicking on checkbox or buttons
-                      if (
-                        (e.target as HTMLElement).closest(
-                          'input[type="checkbox"]'
-                        ) ||
-                        (e.target as HTMLElement).closest('button')
-                      ) {
-                        return;
-                      }
-                      handleSelectEntry(entry.id);
-                    }}
-                  >
-                    <td className='px-3 py-2'>
-                      <input
-                        type='checkbox'
-                        checked={selectedEntries.has(entry.id)}
-                        onChange={e => {
-                          e.stopPropagation(); // Prevent row click
-                          handleSelectEntry(entry.id);
-                        }}
-                        className='h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded'
-                      />
-                    </td>
-                    <td className='px-3 py-2 font-medium'>{index + 1}</td>
-                    <td className='px-3 py-2'>
-                      {format(new Date(entry.c_date), 'dd/MM/yyyy')}
-                    </td>
-                    <td className='px-3 py-2 font-medium text-blue-600'>
-                      {entry.company_name}
-                    </td>
-                    <td className='px-3 py-2'>{entry.acc_name}</td>
-                    <td className='px-3 py-2'>{entry.sub_acc_name || '-'}</td>
-                    <td
-                      className='px-3 py-2 max-w-xs truncate'
-                      title={entry.particulars}
-                    >
-                      {entry.particulars}
-                    </td>
-                    <td className='px-3 py-2 text-right font-medium text-green-600'>
-                      {entry.credit > 0
-                        ? `${entry.credit.toLocaleString()}`
-                        : '-'}
-                    </td>
-                    <td className='px-3 py-2 text-right font-medium text-red-600'>
-                      {entry.debit > 0
-                        ? `${entry.debit.toLocaleString()}`
-                        : '-'}
-                    </td>
-                    <td className='px-3 py-2'>{entry.staff}</td>
-                    <td className='px-3 py-2'>{entry.users}</td>
-                    <td className='px-3 py-2'>
-                      {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'HH:mm:ss')}`}
-                    </td>
-                    <td className='px-3 py-2'>
-                      <Button
-                        variant='secondary'
-                        onClick={() => {
-                          handleDirectApprove(entry.id);
-                        }}
-                        disabled={entry.approved === true}
-                        className='text-xs px-2 py-1'
-                      >
-                        Approve
-                      </Button>
+                {getCurrentPageEntries().length === 0 ? (
+                  <tr>
+                    <td colSpan={13} className='text-center py-8 text-gray-500'>
+                      No pending records found matching the selected filters.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  getCurrentPageEntries().map((entry, index) => (
+                    <tr
+                      key={entry.id}
+                      className={`border-b hover:bg-gray-50 transition-colors ${
+                        entry.approved !== true && entry.approved !== 'true' && entry.approved !== 'rejected'
+                          ? 'bg-orange-50' // Orange background for pending records
+                          : index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                      }`}
+                      onClick={e => {
+                        if (
+                          (e.target as HTMLElement).closest(
+                            'input[type="checkbox"]'
+                          ) ||
+                          (e.target as HTMLElement).closest('button')
+                        ) {
+                          return;
+                        }
+                        handleSelectEntry(entry.id);
+                      }}
+                    >
+                      <td className='px-3 py-2'>
+                        <input
+                          type='checkbox'
+                          checked={selectedEntries.has(entry.id)}
+                          onChange={e => {
+                            e.stopPropagation();
+                            handleSelectEntry(entry.id);
+                          }}
+                          className='h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded'
+                        />
+                      </td>
+                      <td className='px-3 py-2 font-medium'>{index + 1}</td>
+                      <td className='px-3 py-2'>
+                        {format(new Date(entry.c_date), 'dd/MM/yyyy')}
+                      </td>
+                      <td className='px-3 py-2 font-medium text-blue-600'>
+                        {entry.company_name}
+                      </td>
+                      <td className='px-3 py-2'>{entry.acc_name}</td>
+                      <td className='px-3 py-2'>{entry.sub_acc_name || '-'}</td>
+                      <td
+                        className='px-3 py-2 max-w-xs truncate'
+                        title={entry.particulars}
+                      >
+                        {entry.particulars}
+                      </td>
+                      <td className='px-3 py-2 text-right font-medium text-green-600'>
+                        {entry.credit > 0
+                          ? `${entry.credit.toLocaleString()}`
+                          : '-'}
+                      </td>
+                      <td className='px-3 py-2 text-right font-medium text-red-600'>
+                        {entry.debit > 0
+                          ? `${entry.debit.toLocaleString()}`
+                          : '-'}
+                      </td>
+                      <td className='px-3 py-2'>{entry.staff}</td>
+                      <td className='px-3 py-2'>{entry.users}</td>
+                      <td className='px-3 py-2'>
+                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'HH:mm:ss')}`}
+                      </td>
+                      <td className='px-3 py-2'>
+                        <Button
+                          variant='secondary'
+                          onClick={() => {
+                            handleDirectApprove(entry.id);
+                          }}
+                          disabled={entry.approved === true}
+                          className='text-xs px-2 py-1'
+                        >
+                          Approve
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -1873,6 +1843,190 @@ const ApproveRecords: React.FC = () => {
                       setCurrentPage(prev => Math.min(totalPages, prev + 1))
                     }
                     disabled={currentPage === totalPages}
+                    className='rounded-r-md'
+                  >
+                    Next
+                  </Button>
+                </nav>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Approved Records Table */}
+      {!loading && (
+        <Card
+          title='Approved Records'
+          subtitle={`Showing ${getApprovedPageEntries().length} of ${filteredApprovedEntries.length} records`}
+        >
+          <div className='overflow-x-auto'>
+            <table className='w-full text-sm'>
+              <thead className='bg-gray-50 border-b border-gray-200'>
+                <tr>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700 w-12'>
+                    S.No
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Date
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Company
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Account
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Sub Account
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Particulars
+                  </th>
+                  <th className='px-3 py-2 text-right font-medium text-gray-700'>
+                    Credit
+                  </th>
+                  <th className='px-3 py-2 text-right font-medium text-gray-700'>
+                    Debit
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Staff
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    User
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Entry Date & Time
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {getApprovedPageEntries().length === 0 ? (
+                  <tr>
+                    <td colSpan={12} className='text-center py-8 text-gray-500'>
+                      No approved records found matching the selected filters.
+                    </td>
+                  </tr>
+                ) : (
+                  getApprovedPageEntries().map((entry, index) => (
+                    <tr
+                      key={entry.id}
+                      className={`border-b hover:bg-gray-50 transition-colors ${
+                        index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                      }`}
+                    >
+                      <td className='px-3 py-2 font-medium'>{index + 1}</td>
+                      <td className='px-3 py-2'>
+                        {format(new Date(entry.c_date), 'dd/MM/yyyy')}
+                      </td>
+                      <td className='px-3 py-2 font-medium text-blue-600'>
+                        {entry.company_name}
+                      </td>
+                      <td className='px-3 py-2'>{entry.acc_name}</td>
+                      <td className='px-3 py-2'>{entry.sub_acc_name || '-'}</td>
+                      <td
+                        className='px-3 py-2 max-w-xs truncate'
+                        title={entry.particulars}
+                      >
+                        {entry.particulars}
+                      </td>
+                      <td className='px-3 py-2 text-right font-medium text-green-600'>
+                        {entry.credit > 0
+                          ? `${entry.credit.toLocaleString()}`
+                          : '-'}
+                      </td>
+                      <td className='px-3 py-2 text-right font-medium text-red-600'>
+                        {entry.debit > 0
+                          ? `${entry.debit.toLocaleString()}`
+                          : '-'}
+                      </td>
+                      <td className='px-3 py-2'>{entry.staff}</td>
+                      <td className='px-3 py-2'>{entry.users}</td>
+                      <td className='px-3 py-2'>
+                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'HH:mm:ss')}`}
+                      </td>
+                      <td className='px-3 py-2'>
+                        <Button
+                          variant='secondary'
+                          onClick={() => {
+                            handleCancelDirectApprove(entry.id);
+                          }}
+                          className='text-xs px-2 py-1'
+                        >
+                          Cancel Approve
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div className='flex items-center justify-between mt-4 px-2 py-3 sm:px-6'>
+            <div className='flex-1 flex justify-between sm:hidden'>
+              <Button
+                variant='secondary'
+                onClick={() => setApprovedPage(prev => Math.max(1, prev - 1))}
+                disabled={approvedPage === 1}
+              >
+                Previous
+              </Button>
+              <Button
+                variant='secondary'
+                onClick={() =>
+                  setApprovedPage(prev => Math.min(approvedTotalPages, prev + 1))
+                }
+                disabled={approvedPage === approvedTotalPages}
+              >
+                Next
+              </Button>
+            </div>
+            <div className='hidden sm:flex-1 sm:flex sm:items-center sm:justify-between'>
+              <div className='flex-1 text-sm text-center'>
+                <p className='text-sm text-gray-700'>
+                  Showing{' '}
+                  <span className='font-semibold'>
+                    {approvedPage * recordsPerPage - recordsPerPage + 1}
+                  </span>{' '}
+                  to{' '}
+                  <span className='font-semibold'>
+                    {Math.min(
+                      approvedPage * recordsPerPage,
+                      filteredApprovedEntries.length
+                    )}
+                  </span>{' '}
+                  of{' '}
+                  <span className='font-semibold'>
+                    {filteredApprovedEntries.length}
+                  </span>{' '}
+                  results
+                </p>
+              </div>
+              <div>
+                <nav
+                  className='relative z-0 inline-flex rounded-md shadow-sm -space-x-px'
+                  aria-label='Pagination'
+                >
+                  <Button
+                    variant='secondary'
+                    onClick={() =>
+                      setApprovedPage(prev => Math.max(1, prev - 1))
+                    }
+                    disabled={approvedPage === 1}
+                    className='rounded-l-md'
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant='secondary'
+                    onClick={() =>
+                      setApprovedPage(prev => Math.min(approvedTotalPages, prev + 1))
+                    }
+                    disabled={approvedPage === approvedTotalPages}
                     className='rounded-r-md'
                   >
                     Next

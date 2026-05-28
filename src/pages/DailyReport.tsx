@@ -1,17 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
-import Input from '../components/UI/Input';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
 import { supabase } from '../lib/supabase';
 import { getTableName } from '../lib/tableNames';
-import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import CustomCalendar from '../components/UI/CustomCalendar';
-import { format, addDays, subDays, startOfMonth, endOfMonth } from 'date-fns';
+import { format, subDays } from 'date-fns';
 import { Search, Calendar } from 'lucide-react';
 
 interface DailyReportData {
@@ -24,18 +22,73 @@ interface DailyReportData {
   companyBalances: { [key: string]: number };
 }
 
+// Helper function to check if an entry matches the search term across all columns
+const matchDailyReportSearchTerm = (entry: any, searchTerm: string): boolean => {
+  if (!searchTerm) return true;
+  const searchLower = searchTerm.toLowerCase().trim();
+  
+  // Date formatting helpers
+  let dateStr1 = '';
+  let dateStr2 = '';
+  if (entry.c_date) {
+    try {
+      const dateObj = new Date(entry.c_date);
+      if (!isNaN(dateObj.getTime())) {
+        dateStr1 = format(dateObj, 'dd/MM/yyyy');
+        dateStr2 = format(dateObj, 'yyyy-MM-dd');
+      }
+    } catch {
+      // ignore
+    }
+  }
+  
+  // Amount check
+  const creditStr = entry.credit != null ? String(entry.credit) : '';
+  const debitStr = entry.debit != null ? String(entry.debit) : '';
+  
+  // Quantity check
+  const saleQtyStr = entry.sale_qty != null ? String(entry.sale_qty) : '';
+  const purchaseQtyStr = entry.purchase_qty != null ? String(entry.purchase_qty) : '';
+  
+  // Sno
+  const snoStr = entry.sno != null ? String(entry.sno) : '';
+
+  // Payment mode formatting for search
+  const paymentModeStr = entry.payment_mode || '';
+  let paymentModeDisplay = paymentModeStr;
+  if (paymentModeStr === 'Online') {
+    paymentModeDisplay = 'Double';
+  } else if (paymentModeStr === 'Bank Transfer') {
+    paymentModeDisplay = 'Bank';
+  }
+
+  return (
+    entry.company_name?.toLowerCase().includes(searchLower) ||
+    entry.acc_name?.toLowerCase().includes(searchLower) ||
+    entry.sub_acc_name?.toLowerCase().includes(searchLower) ||
+    entry.particulars?.toLowerCase().includes(searchLower) ||
+    entry.staff?.toLowerCase().includes(searchLower) ||
+    entry.users?.toLowerCase().includes(searchLower) ||
+    paymentModeStr.toLowerCase().includes(searchLower) ||
+    paymentModeDisplay.toLowerCase().includes(searchLower) ||
+    creditStr.includes(searchLower) ||
+    debitStr.includes(searchLower) ||
+    saleQtyStr.includes(searchLower) ||
+    purchaseQtyStr.includes(searchLower) ||
+    snoStr.includes(searchLower) ||
+    dateStr1.includes(searchLower) ||
+    dateStr2.includes(searchLower)
+  );
+};
+
 const DailyReport: React.FC = () => {
-  const { user } = useAuth();
   const { mode: tableMode } = useTableMode();
   
-  // Persisted initial date for stable mount; avoid calling helper before it's defined
-  const initialPersistedDate = ((): string => {
-    const saved = localStorage.getItem('dailyReportDate');
-    return saved || format(new Date(), 'yyyy-MM-dd');
-  })();
-  const [selectedDate, setSelectedDate] = useState(initialPersistedDate);
+  // Default to today's date whenever opened; do not load previously selected date
+  const initialDate = format(new Date(), 'yyyy-MM-dd');
+  const [selectedDate, setSelectedDate] = useState(initialDate);
   const [displayDate, setDisplayDate] = useState(() => {
-    const [y, m, d] = initialPersistedDate.split('-');
+    const [y, m, d] = initialDate.split('-');
     return `${d}/${m}/${y}`;
   });
   const [selectedCompany, setSelectedCompany] = useState(
@@ -55,12 +108,10 @@ const DailyReport: React.FC = () => {
     { value: string; label: string }[]
   >([]);
   const [loading, setLoading] = useState(false);
-  const [showCompanyBalances, setShowCompanyBalances] = useState(true);
-  const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const [companyBalancesForPreview, setCompanyBalancesForPreview] = useState<Array<{companyName: string, openingBalance: number, closingBalance: number}>>([]);
   
-  // Data loading states
-  const [totalEntries, setTotalEntries] = useState(0);
   // Calendar entries - same structure as DetailedLedger
   const [calendarEntries, setCalendarEntries] = useState<any[]>([]);
 
@@ -90,6 +141,44 @@ const DailyReport: React.FC = () => {
     
     loadCalendarEntries();
   }, [tableMode]);
+
+  // Pre-calculate company balances for print preview when showing preview and no specific company is selected
+  useEffect(() => {
+    if (showPrintPreview && !selectedCompany && reportData.entries.length > 0) {
+      const fetchBalances = async () => {
+        try {
+          const prevDate = format(subDays(new Date(selectedDate), 1), 'yyyy-MM-dd');
+          const companyBalances = await supabaseDB.getCompanyClosingBalancesByDate(prevDate);
+          
+          const companyTotals: Record<string, { credit: number; debit: number }> = {};
+          reportData.entries.forEach(entry => {
+            const name = entry.company_name;
+            if (!name) return;
+            if (!companyTotals[name]) companyTotals[name] = { credit: 0, debit: 0 };
+            companyTotals[name].credit += parseFloat(entry.credit) || 0;
+            companyTotals[name].debit += parseFloat(entry.debit) || 0;
+          });
+
+          const formattedData = companyBalances.map(company => {
+            const todayTotals = companyTotals[company.companyName] || { credit: 0, debit: 0 };
+            const closingBalance = company.closingBalance + (todayTotals.credit - todayTotals.debit);
+            return {
+              companyName: company.companyName,
+              openingBalance: company.closingBalance,
+              closingBalance: closingBalance,
+            };
+          });
+          setCompanyBalancesForPreview(formattedData);
+        } catch (error) {
+          console.warn('Error fetching company balances for preview:', error);
+          setCompanyBalancesForPreview([]);
+        }
+      };
+      fetchBalances();
+    } else {
+      setCompanyBalancesForPreview([]);
+    }
+  }, [showPrintPreview, selectedDate, reportData.entries, selectedCompany]);
 
   // Helper functions for date format conversion
   const convertToInternalFormat = (ddMMyyyy: string): string => {
@@ -124,10 +213,7 @@ const DailyReport: React.FC = () => {
     generateReport();
   }, [selectedDate, selectedCompany, searchTerm]);
 
-  // Persist filters so the page does not jump back to today automatically
-  useEffect(() => {
-    if (selectedDate) localStorage.setItem('dailyReportDate', selectedDate);
-  }, [selectedDate]);
+  // Do not persist date to localStorage per user request
   useEffect(() => {
     localStorage.setItem('dailyReportCompany', selectedCompany || '');
   }, [selectedCompany]);
@@ -198,7 +284,7 @@ const DailyReport: React.FC = () => {
       if (data.length > 0) {
         toast.success(`Found ${data.length} entries on ${date} with ${uniqueCompanies.length} companies: ${uniqueCompanies.join(', ')}`);
       } else {
-        toast.info(`No entries found on ${date}`);
+        toast(`No entries found on ${date}`);
         // If no entries found, load all companies
         await loadCompanies();
       }
@@ -250,30 +336,7 @@ const DailyReport: React.FC = () => {
       // Apply search filter - only search in Particulars, Credit, Debit
       if (searchTerm) {
         const beforeSearchFilter = filteredEntries.length;
-        const searchLower = searchTerm.toLowerCase().trim();
-        
-        // Check if search term is numeric (for Credit/Debit search)
-        const isNumeric = !isNaN(parseFloat(searchTerm)) && isFinite(Number(searchTerm));
-        const numericValue = isNumeric ? parseFloat(searchTerm) : null;
-        
-        filteredEntries = filteredEntries.filter(entry => {
-          // Search in Particulars (text search)
-          const matchesParticulars = entry.particulars
-            ?.toLowerCase()
-            .includes(searchLower) || false;
-          
-          // Search in Credit (numeric or text)
-          const matchesCredit = numericValue !== null
-            ? (entry.credit && Math.abs(entry.credit - numericValue) < 0.01) // Exact numeric match
-            : entry.credit?.toString().toLowerCase().includes(searchLower) || false;
-          
-          // Search in Debit (numeric or text)
-          const matchesDebit = numericValue !== null
-            ? (entry.debit && Math.abs(entry.debit - numericValue) < 0.01) // Exact numeric match
-            : entry.debit?.toString().toLowerCase().includes(searchLower) || false;
-          
-          return matchesParticulars || matchesCredit || matchesDebit;
-        });
+        filteredEntries = filteredEntries.filter(entry => matchDailyReportSearchTerm(entry, searchTerm));
         console.log(`🔍 Search filter: ${beforeSearchFilter} → ${filteredEntries.length} entries`);
       }
 
@@ -399,10 +462,6 @@ const DailyReport: React.FC = () => {
         companyBalances,
       });
 
-      // Update total entries count for display
-      const totalCount = await supabaseDB.getCashBookEntriesCount();
-      setTotalEntries(totalCount);
-      setAllLoadedEntries(filteredEntries); // Store current filtered entries
 
       console.log(`✅ Daily Report generated for ${selectedDate}: ${filteredEntries.length} entries`);
       toast.success(`Daily Report generated: ${filteredEntries.length} entries for ${selectedDate}`);
@@ -414,21 +473,7 @@ const DailyReport: React.FC = () => {
     }
   };
 
-  const navigateDate = async (direction: 'prev' | 'next') => {
-    const currentDate = new Date(selectedDate);
-    const newDate =
-      direction === 'prev' ? subDays(currentDate, 1) : addDays(currentDate, 1);
-    const newDateString = format(newDate, 'yyyy-MM-dd');
-    const newDisplayDate = format(newDate, 'dd/MM/yyyy');
-    setSelectedDate(newDateString);
-    setDisplayDate(newDisplayDate);
-    // Clear company selection when date changes
-    setSelectedCompany('');
-    // Load companies for the new date
-    await loadCompaniesByDate(newDateString);
-  };
-
-  const printReport = async () => {
+  const handleRealPrint = async () => {
     try {
       const { printDailyReport } = await import('../utils/print');
 
@@ -485,58 +530,12 @@ const DailyReport: React.FC = () => {
         openingBalance: reportData.openingBalance,
         closingBalance: reportData.closingBalance,
         companyBalances: companyBalancesData,
-        isPrintMode: false, // Preview mode - show summary tables
+        isPrintMode: true,
       });
     } catch (error) {
       console.error('Print error:', error);
       toast.error('Print failed. Please try again.');
     }
-  };
-
-  const exportToExcel = () => {
-    const exportData = reportData.entries.map(entry => ({
-      'S.No': entry.sno,
-      Date: format(new Date(entry.c_date), 'dd/MM/yyyy'),
-      Company: entry.company_name,
-      'Main Account': entry.acc_name,
-      'Sub Account': entry.sub_acc_name || '',
-      Particulars: entry.particulars,
-      Credit: entry.credit,
-      Debit: entry.debit,
-      'Sale Qty': entry.sale_qty,
-      'Purchase Qty': entry.purchase_qty || 0,
-      Staff: entry.staff,
-      User: entry.users,
-      'Entry Time': entry.entry_time,
-      Approved: entry.approved ? `${entry.users || 'Unknown User'} - ${entry.entry_time ? format(new Date(entry.entry_time), 'dd/MM/yyyy HH:mm') : 'N/A'}` : 'Pending',
-    }));
-
-    // Create CSV content
-    const headers = Object.keys(exportData[0] || {});
-    const csvContent = [
-      headers.join(','),
-      ...exportData.map(row =>
-        headers.map(header => `"${row[header as keyof typeof row]}"`).join(',')
-      ),
-    ].join('\n');
-
-    // Download file
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `daily-report-${selectedDate}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Report exported successfully!');
-  };
-
-  const getRowColor = (entry: any) => {
-    if (!entry.approved) return 'bg-yellow-50 border-yellow-200';
-    if (entry.edited) return 'bg-blue-50 border-blue-200';
-    if (entry.credit > 0) return 'bg-green-50 border-green-200';
-    if (entry.debit > 0) return 'bg-red-50 border-red-200';
-    return 'bg-white border-gray-200';
   };
 
   return (
@@ -666,7 +665,7 @@ const DailyReport: React.FC = () => {
             <Button variant='secondary' onClick={generateReport}>
               Refresh
             </Button>
-            <Button variant='secondary' onClick={printReport}>
+            <Button variant='secondary' onClick={() => setShowPrintPreview(true)}>
               Print
             </Button>
           </div>
@@ -978,6 +977,180 @@ const DailyReport: React.FC = () => {
           </Card>
         )}
       </div>
+
+      {/* Print Preview Modal */}
+      {showPrintPreview && (() => {
+        const openingBalanceValue = Math.abs(reportData.openingBalance);
+        const closingBalanceValue = Math.abs(reportData.closingBalance);
+        const grandTotalCredit = reportData.totalCredit + openingBalanceValue;
+        const grandTotalDebit = reportData.totalDebit + closingBalanceValue;
+
+        return (
+          <div className='fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 no-print'>
+            <div className='bg-white rounded-lg max-w-5xl w-full max-h-[90vh] overflow-y-auto shadow-2xl'>
+              <div className='p-6'>
+                <div className='flex items-center justify-between mb-6 border-b pb-4'>
+                  <h3 className='text-lg font-bold text-gray-900'>
+                    Print Preview - Daily Report
+                  </h3>
+                  <div className='flex items-center gap-2'>
+                    <Button 
+                      size='sm' 
+                      onClick={handleRealPrint}
+                    >
+                      Print
+                    </Button>
+                    <Button
+                      size='sm'
+                      variant='secondary'
+                      onClick={() => setShowPrintPreview(false)}
+                    >
+                      Close
+                    </Button>
+                  </div>
+                </div>
+
+                {/* On-screen preview container styled like A4 */}
+                <div className='border-2 border-gray-300 p-8 bg-white max-w-4xl mx-auto shadow-inner text-black font-sans' style={{ fontSize: '12px', lineHeight: '1.4' }}>
+                  <div className='flex items-center justify-between border-b-2 border-black pb-2 mb-4'>
+                    <div className='flex-1'>
+                      <div className='text-base font-bold text-gray-800'>Daily Report - {displayDate}</div>
+                    </div>
+                    <div className='flex-1 text-center'>
+                      <div className='text-xl font-bold text-gray-800'>Thirumala Group</div>
+                      <div className='text-[10px] text-gray-500'>Business Management System</div>
+                    </div>
+                    <div className='flex-1 text-right'>
+                      <div className='text-xs font-bold'>
+                        {selectedCompany ? `Company: ${selectedCompany}` : 'All Companies'}
+                      </div>
+                      <div className='text-[9px] text-gray-500'>Thirumala Group - Daily Transaction Report</div>
+                    </div>
+                  </div>
+
+                  <table className='w-full border-collapse border border-black mb-4 text-[11px] font-bold'>
+                    <thead>
+                      <tr className='bg-gray-100'>
+                        <th className='border border-black p-1 text-left w-[5%]'>S.No</th>
+                        <th className='border border-black p-1 text-left w-[15%]'>Company</th>
+                        <th className='border border-black p-1 text-left w-[13%]'>Account</th>
+                        <th className='border border-black p-1 text-left w-[12%]'>Sub Account</th>
+                        <th className='border border-black p-1 text-left w-[22%]'>Particulars</th>
+                        <th className='border border-black p-1 text-right w-[11%]'>Credit</th>
+                        <th className='border border-black p-1 text-right w-[11%]'>Debit</th>
+                        <th className='border border-black p-1 text-left w-[11%]'>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportData.entries.map((entry: any, idx: number) => (
+                        <tr key={entry.sno} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <td className='border border-black p-1 text-center'>{idx + 1}</td>
+                          <td className='border border-black p-1'>{entry.company_name}</td>
+                          <td className='border border-black p-1'>{entry.acc_name}</td>
+                          <td className='border border-black p-1'>{entry.sub_acc_name || '-'}</td>
+                          <td className='border border-black p-1 truncate max-w-[150px]' title={entry.particulars}>{entry.particulars}</td>
+                          <td className='border border-black p-1 text-right text-green-700'>
+                            {entry.credit > 0 ? entry.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '-'}
+                          </td>
+                          <td className='border border-black p-1 text-right text-red-700'>
+                            {entry.debit > 0 ? entry.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '-'}
+                          </td>
+                          <td className='border border-black p-1'>{entry.approved ? 'Approved' : 'Pending'}</td>
+                        </tr>
+                      ))}
+
+                      {/* Integrated Footer Summary Rows */}
+                      <tr className='border-t-2 border-black font-bold'>
+                        <td colSpan={4} className='border border-black p-1'></td>
+                        <td className='border border-black p-1 text-right'>Total</td>
+                        <td className='border border-black p-1 text-right text-green-700'>
+                          {reportData.totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1 text-right text-red-700'>
+                          {reportData.totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1'></td>
+                      </tr>
+                      <tr className='font-bold'>
+                        <td colSpan={4} className='border border-black p-1'></td>
+                        <td className='border border-black p-1 text-right'>Opening Balance</td>
+                        <td className='border border-black p-1 text-right text-green-700'>
+                          {openingBalanceValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1 text-right'>-</td>
+                        <td className='border border-black p-1'></td>
+                      </tr>
+                      <tr className='font-bold'>
+                        <td colSpan={4} className='border border-black p-1'></td>
+                        <td className='border border-black p-1 text-right'>Closing Balance</td>
+                        <td className='border border-black p-1 text-right'>-</td>
+                        <td className='border border-black p-1 text-right text-red-700'>
+                          {closingBalanceValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1'></td>
+                      </tr>
+                      <tr className='bg-gray-100 font-bold border-b-2 border-black'>
+                        <td colSpan={4} className='border border-black p-1'></td>
+                        <td className='border border-black p-1 text-right'>Grand Total</td>
+                        <td className='border border-black p-1 text-right text-green-700'>
+                          {grandTotalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1 text-right text-red-700'>
+                          {grandTotalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className='border border-black p-1'></td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Company balances in preview */}
+                  {companyBalancesForPreview.length > 0 && (
+                    <div className='mt-4'>
+                      <table className='w-full border-collapse border border-black text-[11px] font-bold'>
+                        <thead>
+                          <tr className='bg-gray-100'>
+                            <th colSpan={3} className='border border-black p-1 text-center'>
+                              Company-wise Opening &amp; Closing Balances
+                            </th>
+                          </tr>
+                          <tr className='bg-gray-50'>
+                            <th className='border border-black p-1 text-left'>Company</th>
+                            <th className='border border-black p-1 text-right'>Opening Balance</th>
+                            <th className='border border-black p-1 text-right'>Closing Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {companyBalancesForPreview.map((company) => {
+                            const openAbs = Math.abs(company.openingBalance);
+                            const closeAbs = Math.abs(company.closingBalance);
+                            const isOpenDR = company.openingBalance < 0;
+                            const isCloseDR = company.closingBalance < 0;
+                            return (
+                              <tr key={company.companyName} className='bg-white'>
+                                <td className='border border-black p-1'>{company.companyName}</td>
+                                <td className={`border border-black p-1 text-right ${isOpenDR ? 'text-red-700' : 'text-green-700'}`}>
+                                  {isOpenDR ? '-' : ''}{openAbs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} {isOpenDR ? 'DR' : 'CR'}
+                                </td>
+                                <td className={`border border-black p-1 text-right ${isCloseDR ? 'text-red-700' : 'text-green-700'}`}>
+                                  {isCloseDR ? '-' : ''}{closeAbs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} {isCloseDR ? 'DR' : 'CR'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <div className='text-center border-t border-gray-300 pt-2 mt-4 text-[10px] text-gray-500'>
+                    Generated on {format(new Date(), 'dd/MM/yyyy HH:mm')}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

@@ -158,30 +158,14 @@ export const printTable = (
       color: #333;
     }
     
-    .text-right {
-      text-align: right;
-    }
-    
-    .text-center {
-      text-align: center;
-    }
-    
-    .text-bold {
-      font-weight: bold;
-    }
-    
-    .text-green {
-      color: #059669;
-    }
-    
-    .text-red {
-      color: #dc2626;
-    }
-    
-    .text-orange {
-      color: #ea580c;
-    }
+    .text-right { text-align: right; }
+    .text-center { text-align: center; }
+    .text-bold { font-weight: bold; }
+    .text-green { color: #059669; }
+    .text-red { color: #dc2626; }
+    .text-orange { color: #ea580c; }
   `;
+
   const tableRows = data
     .map(row => {
       const cells = columns
@@ -189,7 +173,6 @@ export const printTable = (
           const value = row[col.key];
           let displayValue = value;
 
-          // Format numbers
           if (typeof value === 'number') {
             if (
               col.key.toLowerCase().includes('amount') ||
@@ -203,7 +186,6 @@ export const printTable = (
             }
           }
 
-          // Format dates
           if (col.key.toLowerCase().includes('date') && value) {
             try {
               displayValue = format(new Date(value), 'dd/MM/yyyy');
@@ -224,7 +206,6 @@ export const printTable = (
     .map(col => `<th style="width: ${col.width || 'auto'}">${col.label}</th>`)
     .join('');
 
-  // Generate summary if data has totals
   let summaryHTML = '';
   if (data.length > 0) {
     const numericColumns = columns.filter(
@@ -266,7 +247,6 @@ export const printTable = (
     }
   }
 
-  // Complete HTML
   const html = `
     <!DOCTYPE html>
     <html>
@@ -311,11 +291,9 @@ export const printTable = (
     </html>
   `;
 
-  // Write to print window
   printWindow.document.write(html);
   printWindow.document.close();
 
-  // Wait for content to load then print
   printWindow.onload = () => {
     printWindow.print();
     printWindow.close();
@@ -436,14 +414,17 @@ export const printDrivers = (data: any[], options: PrintOptions = {}) => {
   });
 };
 
-// Specialized print function for Daily Reports with enhanced Thirumala Group branding
+// ─────────────────────────────────────────────────────────────────────────────
+// Specialized print function for Daily Reports with Thirumala Group branding
+// FIX: Uses a single popup with direct window.print() — no second popup needed.
+// ─────────────────────────────────────────────────────────────────────────────
 export const printDailyReport = (data: any[], options: PrintOptions = {}) => {
   const {
     title = 'Daily Report',
     subtitle = '',
     orientation = 'portrait',
     paperSize = 'A4',
-    margins = { top: '0.3in', right: '0.5in', bottom: '1in', left: '0.5in' },
+    margins = { top: '0.3in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
     includeHeader = true,
     includeFooter = true,
     headerText = 'Thirumala Group - Daily Transaction Report',
@@ -451,895 +432,322 @@ export const printDailyReport = (data: any[], options: PrintOptions = {}) => {
     openingBalance = 0,
     closingBalance = 0,
     companyBalances = [],
-    isPrintMode = false,
   } = options;
 
-  // Create print window
+  // Open a single print window — no second popup required
   const printWindow = window.open('', '_blank');
   if (!printWindow) {
     throw new Error('Popup blocked. Please allow popups for this site.');
   }
 
-  // Basic CSS for Daily Report with simple Thirumala Group branding
+  const formatCurrency = (value: number) =>
+    value.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+
+  // Columns for the main table (Date and Staff excluded per business requirement)
+  const columns = [
+    { key: 'sno', label: 'S.No', width: '5%' },
+    { key: 'companyName', label: 'Company', width: '15%' },
+    { key: 'accountName', label: 'Account', width: '13%' },
+    { key: 'subAccount', label: 'Sub Account', width: '12%' },
+    { key: 'particulars', label: 'Particulars', width: '22%' },
+    { key: 'credit', label: 'Credit', width: '11%' },
+    { key: 'debit', label: 'Debit', width: '11%' },
+    { key: 'approved', label: 'Status', width: '11%' },
+  ];
+
+  const filteredColumns = columns.filter(col => {
+    if (!data || data.length === 0) return true;
+    return Object.prototype.hasOwnProperty.call(data[0], col.key);
+  });
+
+  // Build table rows
+  const tableRows = data
+    .map((row, index) => {
+      const cells = filteredColumns
+        .map(col => {
+          let value = row[col.key];
+          if (col.key === 'sno') value = index + 1;
+          let displayValue: string | number = value ?? '';
+
+          if (typeof value === 'number') {
+            if (
+              col.key.toLowerCase().includes('credit') ||
+              col.key.toLowerCase().includes('debit') ||
+              col.key.toLowerCase().includes('balance') ||
+              col.key.toLowerCase().includes('amount')
+            ) {
+              displayValue = value === 0 ? '-' : formatCurrency(value);
+            } else {
+              displayValue = value.toLocaleString('en-IN');
+            }
+          }
+
+          if (col.key.toLowerCase().includes('date') && value) {
+            try {
+              displayValue = format(new Date(value), 'dd/MM/yyyy');
+            } catch {
+              displayValue = value;
+            }
+          }
+
+          return `<td style="border:1px solid #000;padding:4px 3px;font-weight:bold;">${displayValue}</td>`;
+        })
+        .join('');
+
+      const rowBg = index % 2 === 0 ? '#fff' : '#f9fafb';
+      return `<tr style="background:${rowBg};">${cells}</tr>`;
+    })
+    .join('');
+
+  const tableHeaders = filteredColumns
+    .map(
+      col =>
+        `<th style="width:${col.width};border:1px solid #000;padding:5px 4px;background:#f3f4f6;font-size:11px;text-align:left;">${col.label}</th>`
+    )
+    .join('');
+
+  // Calculate totals
+  const creditTotal = data.reduce((sum, row) => {
+    const v = row.credit;
+    if (v === null || v === undefined || v === '') return sum;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
+    return sum + (isNaN(n) ? 0 : n);
+  }, 0);
+
+  const debitTotal = data.reduce((sum, row) => {
+    const v = row.debit;
+    if (v === null || v === undefined || v === '') return sum;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
+    return sum + (isNaN(n) ? 0 : n);
+  }, 0);
+
+  const openingBalanceValue = Math.abs(openingBalance);
+  const closingBalanceValue = Math.abs(closingBalance);
+  const grandTotalCredit = creditTotal + openingBalanceValue;
+  const grandTotalDebit = debitTotal + closingBalanceValue;
+
+  // Trailing summary rows in main table (aligned under Particulars, Credit, Debit, Status)
+  const summaryRowsHTML = `
+    <tr style="border-top: 2px solid #000; font-weight: bold;">
+      <td colspan="4" style="border: 1px solid #000; padding: 5px 4px;"></td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">Total</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #059669;">${formatCurrency(creditTotal)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #dc2626;">${formatCurrency(debitTotal)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px;"></td>
+    </tr>
+    <tr style="font-weight: bold;">
+      <td colspan="4" style="border: 1px solid #000; padding: 5px 4px;"></td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">Opening Balance</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #059669;">${formatCurrency(openingBalanceValue)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">-</td>
+      <td style="border: 1px solid #000; padding: 5px 4px;"></td>
+    </tr>
+    <tr style="font-weight: bold;">
+      <td colspan="4" style="border: 1px solid #000; padding: 5px 4px;"></td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">Closing Balance</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">-</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #dc2626;">${formatCurrency(closingBalanceValue)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px;"></td>
+    </tr>
+    <tr style="background: #f3f4f6; font-weight: bold; border-bottom: 2px solid #000;">
+      <td colspan="4" style="border: 1px solid #000; padding: 5px 4px;"></td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right;">Grand Total</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #059669;">${formatCurrency(grandTotalCredit)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px; text-align: right; color: #dc2626;">${formatCurrency(grandTotalDebit)}</td>
+      <td style="border: 1px solid #000; padding: 5px 4px;"></td>
+    </tr>
+  `;
+
+  // Company-wise balances (only when provided)
+  let companyTableHTML = '';
+  if (companyBalances && companyBalances.length > 0) {
+    const rows = companyBalances
+      .map(company => {
+        const openingAbs = Math.abs(company.openingBalance);
+        const closingAbs = Math.abs(company.closingBalance);
+        const isOpenDR = company.openingBalance < 0;
+        const isCloseDR = company.closingBalance < 0;
+        const openText = `${isOpenDR ? '-' : ''}${openingAbs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isOpenDR ? 'DR' : 'CR'}`;
+        const closeText = `${isCloseDR ? '-' : ''}${closingAbs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isCloseDR ? 'DR' : 'CR'}`;
+        return `
+          <tr>
+            <td style="border:1px solid #000;padding:4px 6px;font-weight:bold;">${company.companyName}</td>
+            <td style="border:1px solid #000;padding:4px 6px;text-align:right;color:${isOpenDR ? '#dc2626' : '#059669'};">${openText}</td>
+            <td style="border:1px solid #000;padding:4px 6px;text-align:right;color:${isCloseDR ? '#dc2626' : '#059669'};">${closeText}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    companyTableHTML = `
+      <div class="company-balances-container" style="width: 100%; margin-top: 12px;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-weight:bold;">
+          <thead>
+            <tr>
+              <th colspan="3" style="border:1px solid #000;padding:5px 8px;background:#f3f4f6;text-align:center;">
+                Company-wise Opening &amp; Closing Balances
+              </th>
+            </tr>
+            <tr>
+              <th style="border:1px solid #000;padding:5px 8px;background:#f3f4f6;text-align:left;">Company</th>
+              <th style="border:1px solid #000;padding:5px 8px;background:#f3f4f6;text-align:right;">Opening Balance</th>
+              <th style="border:1px solid #000;padding:5px 8px;background:#f3f4f6;text-align:right;">Closing Balance</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // Subtitle rendering
+  const subtitleHTML = subtitle
+    ? subtitle.startsWith('Company:')
+      ? `Company: <strong>${subtitle.replace('Company:', '').trim()}</strong>`
+      : `<strong>${subtitle}</strong>`
+    : '';
+
   const css = `
     @media print {
       @page {
         size: ${paperSize} ${orientation};
         margin: ${margins.top} ${margins.right} ${margins.bottom} ${margins.left};
       }
+      .no-print { display: none !important; }
+      .company-balances-container { display: none !important; }
+      body {
+        background: white !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+      .print-container {
+        border: none !important;
+        box-shadow: none !important;
+        padding: 4px !important;
+        margin: 0 !important;
+      }
     }
-    
+
     body {
-      font-family: 'Arial', sans-serif;
-      font-size: 14px;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
       line-height: 1.4;
       margin: 0;
-      padding: 20px;
-      font-weight: bold;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      min-height: 100vh;
-      background-color: #f5f5f5;
+      padding: 16px;
+      background: #f5f5f5;
     }
-    
+
     .print-container {
-      max-width: 100%;
-      width: 100%;
-      margin: 0 auto;
-      background-color: white;
-      padding: 20px;
+      background: white;
+      padding: 16px;
       border: 2px solid #333;
       box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
-      overflow: visible;
       box-sizing: border-box;
     }
-    
+
     .print-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid #333;
-      padding-bottom: 2px;
-      margin-bottom: 4px;
-      margin-top: 0;
-      padding-top: 0;
+      border-bottom: 2px solid #333;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
     }
-    
-    .header-left {
-      flex: 1;
-    }
-    
-    .header-center {
-      flex: 1;
-      text-align: center;
-    }
-    
-    .header-right {
-      flex: 1;
-      text-align: right;
-    }
-    
-    .company-name {
-      font-size: 18px;
-      font-weight: bold;
-      color: #333;
-      margin: 0;
-      padding: 0;
-      line-height: 1;
-    }
-    
-    .company-subtitle {
-      font-size: 12px;
-      font-weight: bold;
-      color: #666;
-      margin: 0;
-      padding: 0;
-      line-height: 1;
-    }
-    
-    .print-title {
-      font-size: 22px;
-      font-weight: bold;
-      color: #333;
-      margin: 0;
-      padding: 0;
-      line-height: 1;
-    }
-    
-    .print-subtitle {
-      font-size: 18px;
-      font-weight: bold;
-      color: #333;
-      margin: 0;
-      padding: 0;
-      line-height: 1;
-    }
-    
-    .print-header-text {
-      font-size: 12px;
-      font-weight: bold;
-      color: #333;
-      margin: 0;
-      padding: 0;
-      line-height: 1;
-    }
-    
-    .print-table {
+
+    table.main-table {
       width: 100%;
-      max-width: 100%;
       border-collapse: collapse;
-      margin: 20px 0;
+      margin: 0 0 8px 0;
+      font-size: 11px;
+      font-weight: bold;
       table-layout: auto;
-      word-wrap: break-word;
     }
-    
-    .print-table tfoot {
-      display: table-row-group;
-    }
-    
-    .print-table tfoot tr {
-      page-break-inside: avoid;
-      break-inside: avoid;
-    }
-    
-    .print-table th {
-      background-color: #f3f4f6;
-      border: 1px solid #d1d5db;
-      padding: 6px 4px;
-      text-align: left;
-      font-weight: bold;
-      font-size: 11px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    
-    .print-table td {
-      border: 1px solid #d1d5db;
-      padding: 4px;
-      font-size: 11px;
-      font-weight: bold;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      word-wrap: break-word;
-    }
-    
-    .print-table tr:nth-child(even) {
-      background-color: #f9fafb;
-    }
-    
+
     .print-footer {
       text-align: center;
-      border-top: 1px solid #333;
-      padding-top: 10px;
-      margin-top: 20px;
-      font-size: 12px;
-      font-weight: bold;
+      border-top: 1px solid #ccc;
+      padding-top: 8px;
+      margin-top: 16px;
+      font-size: 11px;
       color: #666;
     }
-    
-    .print-summary {
-      margin: 0 auto 0 0;
-      padding: 0;
-      background: transparent;
-      border: none;
-      width: fit-content;
-      max-width: 100%;
-      margin-left: auto !important;
-      margin-right: 0 !important;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-    }
-    
-    .print-summary h3 {
-      margin: 0 0 10px 0;
-      font-size: 16px;
-      font-weight: bold;
-      color: #333;
-    }
-    
-    .print-summary-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      margin: 2px 0;
-      font-size: 13px;
-      font-weight: bold;
-      width: 100%;
-      column-gap: 16px;
+
+    .no-print {
+      text-align: center;
+      margin: 12px 0;
     }
 
-    /* Boxed tables for summaries */
-    .boxed-table {
-      width: auto;
-      max-width: 620px;
-      border-collapse: collapse;
-      margin: 0;
-      font-size: 13px;
-      font-weight: bold;
-      margin-left: auto !important;
-      margin-right: 0 !important;
-      display: table;
-    }
-    .boxed-table th {
-      background-color: #f3f4f6;
-      text-align: left;
-      padding: 4px 6px;
-      border: 1px solid #d1d5db;
-      font-weight: bold;
-      font-size: 13px;
-    }
-    .boxed-table td {
-      padding: 4px 6px;
-      border: 1px solid #d1d5db;
-      font-weight: bold;
-      font-size: 13px;
-    }
-    
-    /* Summary table for Total, Opening Balance, Closing Balance, Grand Total */
-    .summary-balance-table {
-      width: 100%;
-      max-width: 620px;
-      border-collapse: collapse;
-      margin: 10px 0;
-      font-size: 13px;
-      font-weight: bold;
-    }
-    .summary-balance-table th,
-    .summary-balance-table td {
-      padding: 6px 8px;
-      font-weight: bold;
-      font-size: 13px;
-      border: 1px solid #000;
-      font-weight: bold;
-    }
-    .summary-balance-table th {
-      background-color: #f3f4f6;
-      font-weight: bold;
-    }
-    .summary-balance-table th:first-child {
-      text-align: left;
-    }
-    .summary-balance-table th:not(:first-child) {
-      text-align: right;
-    }
-    .summary-balance-table td:first-child {
-      text-align: left;
-      font-weight: bold;
-    }
-    .summary-balance-table td:not(:first-child) {
-      text-align: right;
-      font-weight: bold;
-    }
-    
-    @media print {
-      .print-table th,
-      .print-table td {
-        border: 1px solid #000 !important;
-      }
-      .boxed-table th,
-      .boxed-table td {
-        border: 1px solid #000 !important;
-      }
-      .summary-balance-table th,
-      .summary-balance-table td {
-        border: 1px solid #000 !important;
-      }
-    }
-    .balance-row {
-      display: flex;
-      gap: 20px;
-    }
-    .balance-item {
-      flex: 1;
-    }
-    
-    .print-summary-label {
-      font-weight: 600;
-      color: #222;
-    }
-    
-    .print-summary-value {
-      color: #333;
-    }
-    
-    .text-right {
-      text-align: right;
-    }
-    
-    .text-center {
-      text-align: center;
-    }
-    
-    .text-bold {
-      font-weight: bold;
-    }
-    
-    .text-green {
-      color: #059669;
-    }
-    
-    .text-red {
-      color: #dc2626;
-    }
-    
-    .text-orange {
-      color: #ea580c;
-    }
-    
-    .print-button {
-      position: fixed;
-      top: 10px;
-      right: 10px;
-      z-index: 1000;
-      background: #007bff;
+    .no-print button {
+      background: #2563eb;
       color: white;
       border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
-      font-size: 12px;
+      padding: 10px 28px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: bold;
       cursor: pointer;
     }
-    
-    .print-button:hover {
-      background: #0056b3;
-    }
-    
-    @media print {
-      @page {
-        size: A4 portrait;
-        margin: 0.3in 0.5in 0.5in 0.5in;
-      }
-      body {
-        background-color: white;
-        padding: 0;
-        margin: 0;
-        display: block;
-        width: 100%;
-        max-width: 100%;
-        overflow: hidden;
-      }
-      .print-container {
-        max-width: 100%;
-        width: 100%;
-        margin: 0;
-        padding: 0;
-        border: none;
-        box-shadow: none;
-        page-break-inside: avoid;
-      }
-      .print-table {
-        width: 100% !important;
-        max-width: 100% !important;
-        font-size: 10px;
-        page-break-inside: auto;
-        table-layout: auto;
-        word-wrap: break-word;
-        border-collapse: collapse !important;
-      }
-      .print-table th,
-      .print-table td {
-        padding: 3px 2px;
-        font-size: 10px;
-        border: 1px solid #000 !important;
-        word-wrap: break-word;
-        box-sizing: border-box;
-      }
-      .print-table tfoot {
-        display: table-row-group !important;
-        width: 100% !important;
-      }
-      .print-table tfoot tr {
-        page-break-inside: avoid !important;
-        break-inside: avoid !important;
-        display: table-row !important;
-        width: 100% !important;
-      }
-      .print-table tfoot td {
-        white-space: nowrap;
-        box-sizing: border-box;
-      }
-      .print-button {
-        display: none;
-      }
-      .print-summary,
-      .boxed-table {
-        max-width: 100%;
-        width: auto;
-        page-break-inside: avoid;
-        break-inside: avoid;
-      }
+
+    .no-print button:hover {
+      background: #1d4ed8;
     }
   `;
 
-  // Generate table HTML - Adjusted widths to fit A4 page
-  const columns = [
-    { key: 'sno', label: 'S.No', width: '5%' },
-    { key: 'date', label: 'Date', width: '8%' },
-    { key: 'companyName', label: 'Company', width: '15%' },
-    { key: 'accountName', label: 'Account', width: '12%' },
-    { key: 'subAccount', label: 'Sub Account', width: '12%' },
-    { key: 'particulars', label: 'Particulars', width: '18%' },
-    { key: 'credit', label: 'Credit', width: '10%' },
-    { key: 'debit', label: 'Debit', width: '10%' },
-    { key: 'staff', label: 'Staff', width: '10%' },
-  ];
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>${title} - Thirumala Group</title>
+  <meta charset="utf-8">
+  <style>${css}</style>
+</head>
+<body>
+  <div class="no-print">
+    <button onclick="window.print()">&#128424; Print</button>
+  </div>
+  <div class="print-container">
+    ${includeHeader ? `
+    <div class="print-header">
+      <div style="flex:1;">
+        <div style="font-size:17px;font-weight:bold;color:#333;">${title}</div>
+      </div>
+      <div style="flex:1;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;color:#333;">Thirumala Group</div>
+        <div style="font-size:11px;color:#666;">Business Management System</div>
+      </div>
+      <div style="flex:1;text-align:right;">
+        ${subtitleHTML ? `<div style="font-size:13px;font-weight:bold;">${subtitleHTML}</div>` : ''}
+        <div style="font-size:10px;color:#666;">${headerText}</div>
+      </div>
+    </div>
+    ` : ''}
 
-  const formatCurrency = (value: number) =>
-    value.toLocaleString('en-IN', { minimumFractionDigits: 2 });
-
-  const buildTotalsSummaryTable = (
-    totals: {
-      totalCredit: number;
-      totalDebit: number;
-      openingBalanceValue: number;
-      closingBalanceValue: number;
-      grandTotalCredit: number;
-      grandTotalDebit: number;
-    },
-    borderColor = '#000'
-  ) => `
-    <table class="summary-balance-table" style="border-color: ${borderColor};">
+    <table class="main-table">
       <thead>
-        <tr>
-          <th style="border: 1px solid ${borderColor};">Description</th>
-          <th style="border: 1px solid ${borderColor};">Credit</th>
-          <th style="border: 1px solid ${borderColor};">Debit</th>
-        </tr>
+        <tr>${tableHeaders}</tr>
       </thead>
       <tbody>
-        <tr>
-          <td style="border: 1px solid ${borderColor};">Total</td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.totalCredit)}</td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.totalDebit)}</td>
-        </tr>
-        <tr>
-          <td style="border: 1px solid ${borderColor};">Opening Balance</td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.openingBalanceValue)}</td>
-          <td style="border: 1px solid ${borderColor};"></td>
-        </tr>
-        <tr>
-          <td style="border: 1px solid ${borderColor};">Closing Balance</td>
-          <td style="border: 1px solid ${borderColor};"></td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.closingBalanceValue)}</td>
-        </tr>
-        <tr>
-          <td style="border: 1px solid ${borderColor};">Grand Total</td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.grandTotalCredit)}</td>
-          <td style="border: 1px solid ${borderColor};">${formatCurrency(totals.grandTotalDebit)}</td>
-        </tr>
+        ${tableRows}
+        ${summaryRowsHTML}
       </tbody>
     </table>
-  `;
 
-  // Remove Date and Staff columns when not provided in data (or explicitly excluded)
-  const filteredColumns = columns.filter(col => {
-    if (col.key === 'date' || col.key === 'staff') return false;
-    if (!data || data.length === 0) return true;
-    return Object.prototype.hasOwnProperty.call(data[0], col.key);
-  });
+    ${companyTableHTML}
 
-  const tableRows = data
-    .map((row, index) => {
-      const cells = filteredColumns
-        .map(col => {
-          let value = row[col.key];
-          
-          // Fix S.No to start from 1
-          if (col.key === 'sno') {
-            value = index + 1;
-          }
-          
-          let displayValue = value;
+    ${includeFooter ? `
+    <div class="print-footer">
+      <p>${footerText}</p>
+    </div>
+    ` : ''}
+  </div>
+</body>
+</html>`;
 
-          // Format numbers
-          if (typeof value === 'number') {
-            if (
-              col.key.toLowerCase().includes('amount') ||
-              col.key.toLowerCase().includes('credit') ||
-              col.key.toLowerCase().includes('debit') ||
-              col.key.toLowerCase().includes('balance')
-            ) {
-              displayValue = `${value.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
-            } else {
-              displayValue = value.toLocaleString('en-IN');
-            }
-          }
-
-          // Format dates
-          if (col.key.toLowerCase().includes('date') && value) {
-            try {
-              displayValue = format(new Date(value), 'dd/MM/yyyy');
-            } catch (e) {
-              displayValue = value;
-            }
-          }
-
-          return `<td style="font-weight: bold; border: 1px solid #d1d5db; padding: 4px 3px;">${displayValue || ''}</td>`;
-        })
-        .join('');
-
-      return `<tr>${cells}</tr>`;
-    })
-    .join('');
-
-  const tableHeaders = filteredColumns
-    .map(col => `<th style="width: ${col.width || 'auto'}; font-weight: bold; font-size: 11px; padding: 4px 3px;">${col.label}</th>`)
-    .join('');
-
-  // Calculate totals for the table footer
-  const creditTotal = data.length > 0 ? data.reduce((sum, row) => {
-    const creditValue = row.credit;
-    if (creditValue === null || creditValue === undefined || creditValue === '') return sum;
-    const numValue = typeof creditValue === 'number' ? creditValue : parseFloat(String(creditValue).replace(/,/g, ''));
-    return sum + (isNaN(numValue) ? 0 : numValue);
-  }, 0) : 0;
-  const debitTotal = data.length > 0 ? data.reduce((sum, row) => {
-    const debitValue = row.debit;
-    if (debitValue === null || debitValue === undefined || debitValue === '') return sum;
-    const numValue = typeof debitValue === 'number' ? debitValue : parseFloat(String(debitValue).replace(/,/g, ''));
-    return sum + (isNaN(numValue) ? 0 : numValue);
-  }, 0) : 0;
-  const balance = creditTotal - debitTotal;
-
-  // Generate summary table - removed per user request
-  let summaryHTML = '';
-  // Check if subtitle indicates "All Companies"
-  const isAllCompanies = !subtitle || subtitle.toLowerCase().includes('all companies') || subtitle === '';
-
-  // Company-wise closing balance for the filtered data
-  let companySummaryHTML = '';
-  
-  // Generate company summary HTML for both preview and print modes when companyBalances are provided
-  if (companyBalances && companyBalances.length > 0) {
-    companySummaryHTML = `
-      <div class="print-summary" style="margin-left: auto; margin-right: 0; width: fit-content; text-align: right;">
-        <table class="boxed-table" style="margin-left: auto; margin-right: 0;">
-          <thead>
-            <tr><th colspan="3">Company-wise Opening and Closing Balances</th></tr>
-            <tr>
-              <th>Company</th>
-              <th>Opening Balance</th>
-              <th>Closing Balance</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${companyBalances.map(company => {
-              const openingValue = Math.abs(company.openingBalance);
-              const closingValue = Math.abs(company.closingBalance);
-              const isOpeningDR = company.openingBalance < 0;
-              const isClosingDR = company.closingBalance < 0;
-              const openingText = `${isOpeningDR ? '-' : ''}${openingValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isOpeningDR ? 'DR' : 'CR'}`;
-              const closingText = `${isClosingDR ? '-' : ''}${closingValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isClosingDR ? 'DR' : 'CR'}`;
-              return `
-                <tr>
-                  <td><strong>${company.companyName}</strong></td>
-                  <td class="${isOpeningDR ? 'text-red' : 'text-green'}">${openingText}</td>
-                  <td class="${isClosingDR ? 'text-red' : 'text-green'}">${closingText}</td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  // Render subtitle with bold company name when present
-  const subtitleHTML = subtitle
-    ? (subtitle.startsWith('Company:')
-        ? `Company: <span class="text-bold">${subtitle.replace('Company:', '').trim()}</span>`
-        : `<span class="text-bold">${subtitle}</span>`)
-    : '';
-
-  // Generate print mode HTML function (to be called when print button is clicked)
-  const generatePrintModeHTMLString = () => {
-    const creditTotal = data.length > 0 ? data.reduce((sum, row) => {
-      const creditValue = row.credit;
-      if (creditValue === null || creditValue === undefined || creditValue === '') return sum;
-      const numValue = typeof creditValue === 'number' ? creditValue : parseFloat(String(creditValue).replace(/,/g, ''));
-      return sum + (isNaN(numValue) ? 0 : numValue);
-    }, 0) : 0;
-    const debitTotal = data.length > 0 ? data.reduce((sum, row) => {
-      const debitValue = row.debit;
-      if (debitValue === null || debitValue === undefined || debitValue === '') return sum;
-      const numValue = typeof debitValue === 'number' ? debitValue : parseFloat(String(debitValue).replace(/,/g, ''));
-      return sum + (isNaN(numValue) ? 0 : numValue);
-    }, 0) : 0;
-    
-    // Generate company summary HTML for print mode
-    let printCompanySummaryHTML = '';
-    // Always show company summary if companyBalances are provided (for both preview and print)
-    if (companyBalances && companyBalances.length > 0) {
-      printCompanySummaryHTML = `
-        <div class="print-summary" style="margin-left: auto; margin-right: 0; width: fit-content; text-align: right;">
-          <table class="boxed-table" style="margin-left: auto; margin-right: 0;">
-            <thead>
-              <tr><th colspan="3">Company-wise Opening and Closing Balances</th></tr>
-              <tr>
-                <th>Company</th>
-                <th>Opening Balance</th>
-                <th>Closing Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${companyBalances.map(company => {
-                const openingValue = Math.abs(company.openingBalance);
-                const closingValue = Math.abs(company.closingBalance);
-                const isOpeningDR = company.openingBalance < 0;
-                const isClosingDR = company.closingBalance < 0;
-                const openingText = `${isOpeningDR ? '-' : ''}${openingValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isOpeningDR ? 'DR' : 'CR'}`;
-                const closingText = `${isClosingDR ? '-' : ''}${closingValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })} ${isClosingDR ? 'DR' : 'CR'}`;
-                return `
-                  <tr>
-                    <td><strong>${company.companyName}</strong></td>
-                    <td style="color: ${isOpeningDR ? '#dc2626' : '#059669'}; font-weight: bold;">${openingText}</td>
-                    <td style="color: ${isClosingDR ? '#dc2626' : '#059669'}; font-weight: bold;">${closingText}</td>
-                  </tr>
-                `;
-              }).join('')}
-            </tbody>
-          </table>
-        </div>
-      `;
-    }
-    
-    const printModeTableRows = data
-      .map((row, index) => {
-        const cells = filteredColumns
-          .map(col => {
-            let value = row[col.key];
-            
-            // Fix S.No to start from 1
-            if (col.key === 'sno') {
-              value = index + 1;
-            }
-            
-            let displayValue = value;
-
-            if (typeof value === 'number') {
-              if (
-                col.key.toLowerCase().includes('amount') ||
-                col.key.toLowerCase().includes('credit') ||
-                col.key.toLowerCase().includes('debit') ||
-                col.key.toLowerCase().includes('balance')
-              ) {
-                displayValue = `${value.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
-              } else {
-                displayValue = value.toLocaleString('en-IN');
-              }
-            }
-
-            if (col.key.toLowerCase().includes('date') && value) {
-              try {
-                displayValue = format(new Date(value), 'dd/MM/yyyy');
-              } catch (e) {
-                displayValue = value;
-              }
-            }
-
-            return `<td style="font-weight: bold; border: 1px solid #000; padding: 4px 3px;">${displayValue || ''}</td>`;
-          })
-          .join('');
-
-        return `<tr>${cells}</tr>`;
-      })
-      .join('');
-
-    // Calculate grand totals
-    const grandTotalCredit = creditTotal + openingBalance;
-    const grandTotalDebit = debitTotal + closingBalance;
-    
-    // Format opening and closing balances (without CR/DR for grand total calculation)
-    const openingBalanceValue = Math.abs(openingBalance);
-    const closingBalanceValue = Math.abs(closingBalance);
-
-    const totalsSummaryTable = buildTotalsSummaryTable(
-      {
-        totalCredit: creditTotal,
-        totalDebit: debitTotal,
-        openingBalanceValue,
-        closingBalanceValue,
-        grandTotalCredit,
-        grandTotalDebit,
-      },
-      '#000'
-    );
-
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>${title} - Thirumala Group</title>
-        <style>${css}</style>
-      </head>
-      <body>
-        <div class="print-container">
-          ${includeHeader ? `
-            <div class="print-header">
-              <div class="header-left">
-                <h2 class="print-title">${title}</h2>
-              </div>
-              <div class="header-center">
-                <h1 class="company-name">Thirumala Group</h1>
-                <p class="company-subtitle">Business Management System</p>
-              </div>
-              <div class="header-right">
-                ${subtitleHTML ? `<p class="print-subtitle">${subtitleHTML}</p>` : ''}
-              </div>
-            </div>
-          ` : ''}
-          
-          <table class="print-table" style="width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto;">
-            <thead>
-              <tr>${tableHeaders}</tr>
-            </thead>
-            <tbody>
-              ${printModeTableRows}
-            </tbody>
-          </table>
-
-          <div class="print-summary">
-            ${totalsSummaryTable}
-          </div>
-          
-          <div style="text-align: right; width: 100%;">
-            ${printCompanySummaryHTML}
-          </div>
-          
-          ${includeFooter ? `
-            <div class="print-footer">
-              <p>${footerText}</p>
-            </div>
-          ` : ''}
-        </div>
-      </body>
-      </html>
-    `;
-  };
-
-  // Generate print mode HTML and escape it properly for embedding in script
-  const printModeHTML = generatePrintModeHTMLString();
-  // Escape for embedding in JavaScript string - replace backticks, template expressions, and newlines
-  const printModeHTMLString = printModeHTML
-    .replace(/\\/g, '\\\\')  // Escape backslashes first
-    .replace(/`/g, '\\`')    // Escape backticks
-    .replace(/\${/g, '\\${') // Escape template expressions
-    .replace(/\n/g, '\\n')   // Escape newlines
-    .replace(/\r/g, '')      // Remove carriage returns
-    .replace(/'/g, "\\'")    // Escape single quotes
-    .replace(/"/g, '\\"');   // Escape double quotes
-
-  // Complete HTML with basic Thirumala Group branding
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>${title} - Thirumala Group</title>
-      <style>${css}</style>
-      <script>
-        function handlePrint() {
-          try {
-            const printModeHTML = \`${printModeHTMLString}\`;
-            const actualPrintWindow = window.open('', '_blank');
-            if (actualPrintWindow) {
-              actualPrintWindow.document.write(printModeHTML);
-              actualPrintWindow.document.close();
-              setTimeout(() => {
-                actualPrintWindow.print();
-                setTimeout(() => {
-                  actualPrintWindow.close();
-                }, 100);
-              }, 250);
-            } else {
-              alert('Please allow popups for this site to print.');
-            }
-          } catch (error) {
-            console.error('Print error:', error);
-            alert('Print failed: ' + error.message);
-          }
-        }
-      </script>
-    </head>
-    <body>
-      <button class="print-button" onclick="handlePrint()">Print</button>
-      
-      <div class="print-container">
-        ${includeHeader ? `
-          <div class="print-header">
-            <div class="header-left">
-              <h2 class="print-title">${title}</h2>
-            </div>
-            <div class="header-center">
-              <h1 class="company-name">Thirumala Group</h1>
-              <p class="company-subtitle">Business Management System</p>
-            </div>
-            <div class="header-right">
-              ${subtitleHTML ? `<p class="print-subtitle">${subtitleHTML}</p>` : ''}
-            </div>
-          </div>
-        ` : ''}
-        
-        <table class="print-table" style="width: 100%; max-width: 100%; border-collapse: collapse; table-layout: auto;">
-          <thead>
-            <tr>${tableHeaders}</tr>
-          </thead>
-          <tbody>
-            ${tableRows}
-          </tbody>
-        </table>
-        ${!isPrintMode && data.length > 0 ? (() => {
-            // Calculate totals for preview mode
-            const previewCreditTotal = data.reduce((sum, row) => {
-              const creditValue = row.credit;
-              if (creditValue === null || creditValue === undefined || creditValue === '') return sum;
-              const numValue = typeof creditValue === 'number' ? creditValue : parseFloat(String(creditValue).replace(/,/g, ''));
-              return sum + (isNaN(numValue) ? 0 : numValue);
-            }, 0);
-            const previewDebitTotal = data.reduce((sum, row) => {
-              const debitValue = row.debit;
-              if (debitValue === null || debitValue === undefined || debitValue === '') return sum;
-              const numValue = typeof debitValue === 'number' ? debitValue : parseFloat(String(debitValue).replace(/,/g, ''));
-              return sum + (isNaN(numValue) ? 0 : numValue);
-            }, 0);
-            
-            // Calculate overall opening and closing balances
-            let previewOpeningBalance = Math.abs(openingBalance);
-            let previewClosingBalance = Math.abs(closingBalance);
-            
-            if (isAllCompanies && companyBalances && companyBalances.length > 0) {
-              previewOpeningBalance = companyBalances.reduce((sum, company) => sum + Math.abs(company.openingBalance), 0);
-              previewClosingBalance = companyBalances.reduce((sum, company) => sum + Math.abs(company.closingBalance), 0);
-            }
-            
-            const previewGrandTotalCredit = previewCreditTotal + previewOpeningBalance;
-            const previewGrandTotalDebit = previewDebitTotal + previewClosingBalance;
-            
-            const previewSummaryTable = buildTotalsSummaryTable(
-              {
-                totalCredit: previewCreditTotal,
-                totalDebit: previewDebitTotal,
-                openingBalanceValue: previewOpeningBalance,
-                closingBalanceValue: previewClosingBalance,
-                grandTotalCredit: previewGrandTotalCredit,
-                grandTotalDebit: previewGrandTotalDebit,
-              },
-              '#d1d5db'
-            );
-
-            return `
-            <div class="print-summary">
-              ${previewSummaryTable}
-            </div>
-            `;
-          })() : ''}
-        
-        
-        ${summaryHTML}
-        <div style="text-align: right; width: 100%;">
-          ${companySummaryHTML}
-        </div>
-        
-        ${includeFooter ? `
-          <div class="print-footer">
-            <p>${footerText}</p>
-          </div>
-        ` : ''}
-      </div>
-    </body>
-    </html>
-  `;
-
-  // Write to print window
+  // Write to the single print window and trigger print on load
   printWindow.document.write(html);
   printWindow.document.close();
 
-  // Wait for content to load then focus (don't auto-print)
   printWindow.onload = () => {
     printWindow.focus();
+    printWindow.print();
   };
 };
