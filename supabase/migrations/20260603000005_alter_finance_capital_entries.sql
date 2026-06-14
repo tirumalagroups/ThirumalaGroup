@@ -1,0 +1,23 @@
+-- Alter finance_capital_entries table to add redesign-specific fields
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'finance_capital_entries' AND column_name = 'date') THEN
+    ALTER TABLE finance_capital_entries RENAME COLUMN date TO entry_date;
+  END IF;
+END $$;
+
+ALTER TABLE finance_capital_entries ADD COLUMN IF NOT EXISTS partner_name TEXT;
+ALTER TABLE finance_capital_entries ADD COLUMN IF NOT EXISTS particulars TEXT;
+ALTER TABLE finance_capital_entries ADD COLUMN IF NOT EXISTS credit NUMERIC DEFAULT 0;
+ALTER TABLE finance_capital_entries ADD COLUMN IF NOT EXISTS debit NUMERIC DEFAULT 0;
+ALTER TABLE finance_capital_entries ADD COLUMN IF NOT EXISTS created_by TEXT;
+
+-- Move data from old columns (amount, type, remarks) if they exist and are populated
+UPDATE finance_capital_entries 
+SET 
+  particulars = COALESCE(particulars, remarks),
+  credit = COALESCE(credit, CASE WHEN type = 'Credit' THEN amount ELSE 0 END),
+  debit = COALESCE(debit, CASE WHEN type = 'Debit' THEN amount ELSE 0 END);
+
+-- Disable Row Level Security on finance_capital_entries table
+ALTER TABLE finance_capital_entries DISABLE ROW LEVEL SECURITY;

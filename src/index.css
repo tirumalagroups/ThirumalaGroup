@@ -1,3 +1,54 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer components {
+
+  /* Peek Typography System */
+  .peek-h1 { @apply text-[20px] font-bold text-slate-900 leading-[1.40] tracking-[0.16px]; }
+  .peek-header { @apply text-[16px] font-extrabold text-slate-900 leading-[1.50] tracking-[0.16px]; }
+  .peek-h3 { @apply text-[16px] font-bold text-slate-900 leading-[1.50] tracking-[0.16px]; }
+  .peek-link { @apply text-[14px] font-extrabold text-slate-900 leading-[1.43] tracking-[0.16px]; }
+  .peek-subheading { @apply text-[14px] font-bold text-slate-900 leading-[1.43] tracking-[0.16px]; }
+  .peek-button { @apply text-[14px] font-semibold text-slate-800 leading-[1.43] tracking-[0.16px]; }
+  .peek-caption { @apply text-[12px] font-extrabold text-slate-800 leading-[1.33] tracking-[0.16px]; }
+  .peek-caption-12 { @apply text-[12px] font-bold text-slate-800 leading-[1.33] tracking-[0.3px]; }
+  .peek-label { @apply text-[12px] font-extrabold text-slate-800 leading-[1.33] tracking-[0.16px]; }
+  .peek-small { @apply text-[10px] font-extrabold text-slate-800 leading-[1.25] tracking-[0.16px]; }
+  .peek-small-10 { @apply text-[10px] font-extrabold text-slate-800 leading-[1.50] tracking-[0.5px]; }
+
+  /* Finance Typography System - DO NOT MODIFY WITHOUT CHECKING PEEK SPECS */
+  .finance-h1 {
+    @apply text-[20px] font-bold text-slate-900 leading-[1.40] tracking-[0.16px];
+  }
+  .finance-money {
+    @apply text-[24px] font-extrabold text-slate-900 leading-[1.33] tracking-[0.16px];
+  }
+  .finance-brand {
+    @apply text-[16px] font-extrabold text-slate-900 leading-[1.25] tracking-[0.16px];
+  }
+  .finance-card-title {
+    @apply text-[16px] font-bold text-slate-900 leading-[1.50] tracking-[0.16px];
+  }
+  .finance-sidebar-link {
+    @apply text-[14px] font-bold text-slate-900 leading-[1.25] tracking-[0.16px];
+  }
+  .finance-section-heading {
+    @apply text-[14px] font-bold text-slate-900 leading-[1.43] tracking-[0.35px];
+  }
+  .finance-button {
+    @apply text-[14px] font-semibold text-slate-800 leading-[1.43] tracking-[0.16px];
+  }
+  .finance-input {
+    @apply text-[14px] font-semibold text-slate-800 leading-[1.43] tracking-[0.16px];
+  }
+  .finance-caption {
+    @apply text-[12px] font-extrabold text-slate-800 leading-[1.33] tracking-[0.3px];
+  }
+  .finance-small-label {
+    @apply text-[10px] font-extrabold text-slate-800 leading-[1.50] tracking-[0.5px] uppercase;
+  }
+  .finance-header-time {
+    @apply text-[12px] font-extrabold text-slate-900 leading-[1.33] tracking-[0.16px];
+  }
+}

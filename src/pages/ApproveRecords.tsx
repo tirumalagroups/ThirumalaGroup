@@ -3,14 +3,16 @@ import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
 import SearchableSelect from '../components/UI/SearchableSelect';
-import { supabaseDB } from '../lib/supabaseDatabase';
+import CustomCalendar from '../components/UI/CustomCalendar';
+import { supabaseDB, supabase } from '../lib/supabaseDatabase';
 import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import { format } from 'date-fns';
-import { supabase } from '../lib/supabase';
 import { getTableName } from '../lib/tableNames';
+import { getSharedPrintStyles } from '../utils/print';
+import { useBook } from '../contexts/BookContext';
 import {
   FileText,
   Users,
@@ -21,6 +23,7 @@ import {
   Clock,
   AlertTriangle,
   RefreshCw,
+  Calendar,
 } from 'lucide-react';
 
 interface ApprovalFilters {
@@ -35,6 +38,16 @@ interface ApprovalFilters {
 const ApproveRecords: React.FC = () => {
   const { user, isAdmin } = useAuth();
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
+
+  const isApprovedStatus = (val: any): boolean => {
+    if (val === true) return true;
+    if (typeof val === 'string') {
+      const norm = val.toLowerCase().trim();
+      return norm === 'true' || norm === 'approved';
+    }
+    return false;
+  };
 
   const [filters, setFilters] = useState<ApprovalFilters>({
     date: format(new Date(), 'yyyy-MM-dd'),
@@ -84,12 +97,20 @@ const ApproveRecords: React.FC = () => {
   const [viewEntry, setViewEntry] = useState<any | null>(null);
   const [viewEditing, setViewEditing] = useState(false);
   const [viewDraft, setViewDraft] = useState<any | null>(null);
+  const [showCalendar, setShowCalendar] = useState(false);
 
   // Derive unique sorted dates containing pending records
   const pendingDates = useMemo(() => {
     const dates = [...new Set(allPendingEntries.map(e => e.c_date).filter(Boolean))];
     return dates.sort();
   }, [allPendingEntries]);
+
+  const handleDatePickerChange = (date: string) => {
+    setFilters(prev => ({
+      ...prev,
+      date: date,
+    }));
+  };
 
   // Default filter date to the latest pending date if current date is not in pendingDates
   useEffect(() => {
@@ -109,6 +130,10 @@ const ApproveRecords: React.FC = () => {
   const pendingEntriesForDate = useMemo(() => {
     return allPendingEntries.filter(entry => entry.c_date === filters.date);
   }, [allPendingEntries, filters.date]);
+
+  const currentIndex = pendingDates.indexOf(filters.date);
+  const isPrevDisabled = pendingDates.length === 0 || currentIndex <= 0;
+  const isNextDisabled = pendingDates.length === 0 || currentIndex === -1 || currentIndex >= pendingDates.length - 1;
 
   // Derived filters based only on pending records for the selected date
   const companyOptions = useMemo(() => {
@@ -227,7 +252,11 @@ const ApproveRecords: React.FC = () => {
         throw pendingError;
       }
 
-      const activePending = (pendingData || []).filter(e => e.approved !== 'rejected');
+      // Merge offline operations into the pending list first
+      const mergedPending = await supabaseDB.mergeOfflineOperations('cash_book', pendingData || []);
+
+      // Filter out truly approved and rejected records
+      const activePending = mergedPending.filter((e: any) => !isApprovedStatus(e.approved) && e.approved !== 'rejected');
       setAllPendingEntries(activePending);
 
       let approvedData: any[] = [];
@@ -237,13 +266,26 @@ const ApproveRecords: React.FC = () => {
           .from(getTableName('cash_book'))
           .select('*')
           .eq('c_date', filters.date)
-          .in('approved', [true, 'true']);
+          .in('approved', [true, 'true', 'approved', 'Approved', 'APPROVED']);
         
         if (approvedError) {
           console.error('[ApproveRecords] Error loading approved entries:', approvedError);
           throw approvedError;
         }
         approvedData = approvedRes || [];
+        approvedData = await supabaseDB.mergeOfflineOperations('cash_book', approvedData);
+
+        // Scan the merged pending list for entries that were approved offline for this date and add them
+        const offlineApprovedForDate = mergedPending.filter((e: any) => e.c_date === filters.date && isApprovedStatus(e.approved));
+        
+        // Combine them avoiding duplicates
+        const approvedIds = new Set(approvedData.map(e => e.id));
+        offlineApprovedForDate.forEach((e: any) => {
+          if (!approvedIds.has(e.id)) {
+            approvedData.push(e);
+            approvedIds.add(e.id);
+          }
+        });
       }
       setApprovedEntries(approvedData);
 
@@ -251,6 +293,26 @@ const ApproveRecords: React.FC = () => {
       let deleted = await supabaseDB.getDeletedCashBook();
       setDeletedEntries(deleted || []);
     } catch (error) {
+      if (!navigator.onLine) {
+        console.log('[ApproveRecords] App is offline, loading entries from local queue...');
+        try {
+          const mergedPending = await supabaseDB.mergeOfflineOperations('cash_book', []);
+          const activePending = mergedPending.filter((e: any) => !isApprovedStatus(e.approved) && e.approved !== 'rejected');
+          setAllPendingEntries(activePending);
+
+          const approvedForDate = mergedPending.filter((e: any) => e.c_date === filters.date && isApprovedStatus(e.approved));
+          setApprovedEntries(approvedForDate);
+
+          const deleted = await supabaseDB.getDeletedCashBook();
+          setDeletedEntries(deleted || []);
+          
+          toast.success('Offline mode: Loaded local changes');
+          return; // Prevent standard error message
+        } catch (offlineErr) {
+          console.error('[ApproveRecords] Error loading offline data:', offlineErr);
+        }
+      }
+
       setFetchError('Failed to load entries from the database.');
       console.error('[ApproveRecords] Error loading entries:', error);
       toast.error('Failed to load entries');
@@ -263,7 +325,7 @@ const ApproveRecords: React.FC = () => {
     if (isAdmin) {
       loadEntries();
     }
-  }, [isAdmin, tableMode, filters.date]);
+  }, [isAdmin, tableMode, filters.date, currentBook?.id]);
 
   useEffect(() => {
     const onRefresh = () => {
@@ -288,6 +350,20 @@ const ApproveRecords: React.FC = () => {
   useEffect(() => {
     setDisplayDate(convertToDisplayFormat(filters.date) || format(new Date(), 'dd/MM/yyyy'));
   }, [filters.date]);
+
+  // Clamp currentPage
+  useEffect(() => {
+    if (totalPages > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [filteredEntries.length, totalPages, currentPage]);
+
+  // Clamp approvedPage
+  useEffect(() => {
+    if (approvedTotalPages > 0 && approvedPage > approvedTotalPages) {
+      setApprovedPage(approvedTotalPages);
+    }
+  }, [filteredApprovedEntries.length, approvedTotalPages, approvedPage]);
 
   const applyFilters = () => {
     // 1. Filter pending entries by date and dropdown filters
@@ -346,14 +422,12 @@ const ApproveRecords: React.FC = () => {
     }
     
     const pendingDeleted = del.filter(d => {
-      return d.approved !== true && 
-        d.approved !== 'true' && 
-        d.approved !== 'rejected';
+      return !isApprovedStatus(d.approved) && d.approved !== 'rejected';
     });
     setFilteredDeletedEntries(pendingDeleted);
 
     const totalDeleted = del.length;
-    const approvedDeleted = del.filter(d => d.approved === true || d.approved === 'true').length;
+    const approvedDeleted = del.filter(d => isApprovedStatus(d.approved)).length;
     const rejectedDeleted = del.filter(d => d.approved === 'rejected').length;
     const pendingDeletedCount = totalDeleted - approvedDeleted - rejectedDeleted;
     setDeletedSummary({ totalRecords: totalDeleted, approvedDeleted, rejectedDeleted, pendingDeleted: pendingDeletedCount });
@@ -403,15 +477,11 @@ const ApproveRecords: React.FC = () => {
       });
     }
     
-    const approvedDeleted = deletedFiltered.filter(d => d.approved === true || d.approved === 'true').length;
+    const approvedDeleted = deletedFiltered.filter(d => isApprovedStatus(d.approved)).length;
     const rejectedDeleted = deletedFiltered.filter(d => d.approved === 'rejected').length;
     const totalDeleted = deletedFiltered.length;
     const pendingDeleted = deletedFiltered.filter(d => 
-      (d.approved === null || 
-      d.approved === undefined || 
-      d.approved === '' ||
-      d.approved === 'false' ||
-      d.approved === false) && d.approved !== 'rejected'
+      !isApprovedStatus(d.approved) && d.approved !== 'rejected'
     ).length;
     
     setDeletedSummary({
@@ -490,6 +560,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const handleDirectApprove = async (entryId: string) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     try {
       setLoading(true);
       
@@ -525,6 +599,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const handleCancelDirectApprove = async (entryId: string) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     try {
       setLoading(true);
       
@@ -561,6 +639,10 @@ const ApproveRecords: React.FC = () => {
 
   // Deleted records approve/reject handlers
   const handleDeletedApprove = async (id: string) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     try {
       setLoading(true);
       console.log('🗑️ Approving deleted record:', id);
@@ -630,6 +712,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const handleDeletedReject = async (id: string) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     try {
       setLoading(true);
       const { error } = await supabase
@@ -689,6 +775,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const approveSelected = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     if (selectedEntries.size === 0) {
       toast.error('Please select entries to approve');
       return;
@@ -731,6 +821,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const approveAllCompanywise = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     if (!filters.company) {
       toast.error('Please select a company first');
       return;
@@ -740,14 +834,7 @@ const ApproveRecords: React.FC = () => {
     const companyEntries = filteredEntries.filter(
       entry => {
         const matchesCompany = entry.company_name === filters.company;
-        const approved = entry.approved;
-        const isPending = (
-          approved === null ||
-          approved === undefined ||
-          approved === '' ||
-          approved === 'false' ||
-          approved === false
-        ) && approved !== 'true' && approved !== 'rejected';
+        const isPending = !isApprovedStatus(entry.approved) && entry.approved !== 'rejected';
         return matchesCompany && isPending;
       }
     );
@@ -814,6 +901,10 @@ const ApproveRecords: React.FC = () => {
   };
 
   const approveAllStaffwise = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     if (!filters.staff) {
       toast.error('Please select staff first');
       return;
@@ -823,14 +914,7 @@ const ApproveRecords: React.FC = () => {
     const staffEntries = filteredEntries.filter(
       entry => {
         const matchesStaff = entry.staff === filters.staff;
-        const approved = entry.approved;
-        const isPending = (
-          approved === null ||
-          approved === undefined ||
-          approved === '' ||
-          approved === 'false' ||
-          approved === false
-        ) && approved !== 'true' && approved !== 'rejected';
+        const isPending = !isApprovedStatus(entry.approved) && entry.approved !== 'rejected';
         return matchesStaff && isPending;
       }
     );
@@ -897,18 +981,13 @@ const ApproveRecords: React.FC = () => {
   };
 
   const approveAllWithoutConfirmation = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     // Get all pending entries (not approved and not rejected)
     const pendingEntries = filteredEntries.filter(
-      entry => {
-        const approved = entry.approved;
-        return (
-          approved === null ||
-          approved === undefined ||
-          approved === '' ||
-          approved === 'false' ||
-          approved === false
-        ) && approved !== 'true' && approved !== 'rejected';
-      }
+      entry => !isApprovedStatus(entry.approved) && entry.approved !== 'rejected'
     );
 
     if (pendingEntries.length === 0) {
@@ -970,16 +1049,7 @@ const ApproveRecords: React.FC = () => {
   const approveAllWithConfirmation = async () => {
     // Get all pending entries (not approved and not rejected)
     const pendingEntries = filteredEntries.filter(
-      entry => {
-        const approved = entry.approved;
-        return (
-          approved === null ||
-          approved === undefined ||
-          approved === '' ||
-          approved === 'false' ||
-          approved === false
-        ) && approved !== 'true' && approved !== 'rejected';
-      }
+      entry => !isApprovedStatus(entry.approved) && entry.approved !== 'rejected'
     );
 
     if (pendingEntries.length === 0) {
@@ -1143,7 +1213,7 @@ const ApproveRecords: React.FC = () => {
             <title>${title}</title>
             <style>
               @media print {
-                @page { margin: 1in; }
+                @page { size: portrait; margin: 8mm; }
               }
               body { font-family: Arial, sans-serif; font-size: 12px; margin: 0; padding: 20px; }
               .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
@@ -1156,6 +1226,7 @@ const ApproveRecords: React.FC = () => {
               .pending { background-color: #fef3c7; }
               .summary { margin: 20px 0; padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; }
               .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #666; }
+              ${getSharedPrintStyles({ isLandscape: false })}
             </style>
           </head>
           <body>
@@ -1173,14 +1244,14 @@ const ApproveRecords: React.FC = () => {
             <table>
               <thead>
                 <tr>
-                  <th>S.No</th>
-                  <th>Date</th>
-                  <th>Company</th>
-                  <th>Account</th>
-                  <th>Sub Account</th>
-                  <th>Particulars</th>
-                  <th>Credit</th>
-                  <th>Debit</th>
+                  <th class="col-sno">S.No</th>
+                  <th class="col-date">Date</th>
+                  <th class="col-company">Company</th>
+                  <th class="col-account">Account</th>
+                  <th class="col-sub-account">Sub Account</th>
+                  <th class="col-particulars">Particulars</th>
+                  <th class="col-credit">Credit</th>
+                  <th class="col-debit">Debit</th>
                 </tr>
               </thead>
               <tbody>
@@ -1188,14 +1259,14 @@ const ApproveRecords: React.FC = () => {
                   .map(
                     (entry, index) => `
                   <tr class="${entry.approved ? 'approved' : 'pending'}">
-                    <td>${index + 1}</td>
-                    <td>${format(new Date(entry.c_date), 'dd/MM/yyyy')}</td>
-                    <td>${entry.company_name || ''}</td>
-                    <td>${entry.acc_name || ''}</td>
-                    <td>${entry.sub_acc_name || '-'}</td>
-                    <td>${entry.particulars || ''}</td>
-                    <td>${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
-                    <td>${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
+                    <td class="col-sno text-center">${index + 1}</td>
+                    <td class="col-date">${format(new Date(entry.c_date), 'dd/MM/yyyy')}</td>
+                    <td class="col-company">${entry.company_name || ''}</td>
+                    <td class="col-account">${entry.acc_name || ''}</td>
+                    <td class="col-sub-account">${entry.sub_acc_name || '-'}</td>
+                    <td class="col-particulars">${entry.particulars || ''}</td>
+                    <td class="col-credit text-right">${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
+                    <td class="col-debit text-right">${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
                   </tr>
                 `
                   )
@@ -1246,7 +1317,7 @@ const ApproveRecords: React.FC = () => {
             <title>${title}</title>
             <style>
               @media print {
-                @page { margin: 1in; }
+                @page { size: portrait; margin: 8mm; }
               }
               body { font-family: Arial, sans-serif; font-size: 12px; margin: 0; padding: 20px; }
               .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
@@ -1260,6 +1331,7 @@ const ApproveRecords: React.FC = () => {
               .summary { margin: 20px 0; padding: 15px; background-color: #f8f9fa; border: 1px solid #dee2e6; }
               .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #666; }
               .page-break { page-break-before: always; }
+              ${getSharedPrintStyles({ isLandscape: false })}
             </style>
           </head>
           <body>
@@ -1277,14 +1349,14 @@ const ApproveRecords: React.FC = () => {
             <table>
               <thead>
                 <tr>
-                  <th>S.No</th>
-                  <th>Date</th>
-                  <th>Company</th>
-                  <th>Account</th>
-                  <th>Sub Account</th>
-                  <th>Particulars</th>
-                  <th>Credit</th>
-                  <th>Debit</th>
+                  <th class="col-sno">S.No</th>
+                  <th class="col-date">Date</th>
+                  <th class="col-company">Company</th>
+                  <th class="col-account">Account</th>
+                  <th class="col-sub-account">Sub Account</th>
+                  <th class="col-particulars">Particulars</th>
+                  <th class="col-credit">Credit</th>
+                  <th class="col-debit">Debit</th>
                 </tr>
               </thead>
               <tbody>
@@ -1292,14 +1364,14 @@ const ApproveRecords: React.FC = () => {
                   .map(
                     (entry, _) => `
                   <tr class="${entry.approved ? 'approved' : 'pending'}">
-                    <td>${entry.sno}</td>
-                    <td>${format(new Date(entry.c_date), 'dd/MM/yyyy')}</td>
-                    <td>${entry.company_name || ''}</td>
-                    <td>${entry.acc_name || ''}</td>
-                    <td>${entry.sub_acc_name || '-'}</td>
-                    <td>${entry.particulars || ''}</td>
-                    <td>${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
-                    <td>${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
+                    <td class="col-sno text-center">${entry.sno}</td>
+                    <td class="col-date">${format(new Date(entry.c_date), 'dd/MM/yyyy')}</td>
+                    <td class="col-company">${entry.company_name || ''}</td>
+                    <td class="col-account">${entry.acc_name || ''}</td>
+                    <td class="col-sub-account">${entry.sub_acc_name || '-'}</td>
+                    <td class="col-particulars">${entry.particulars || ''}</td>
+                    <td class="col-credit text-right">${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
+                    <td class="col-debit text-right">${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
                   </tr>
                 `
                   )
@@ -1379,11 +1451,33 @@ const ApproveRecords: React.FC = () => {
           {fetchError}
         </div>
       )}
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print mb-6">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
           <div className='flex items-center gap-3 mb-1'>
-            <h1 className='text-3xl font-bold text-gray-900'>Approve Records</h1>
+            <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+              Approve Records
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+              </span>
+            </h1>
             <ModeLabel />
           </div>
           <p className='text-gray-600'>
@@ -1419,28 +1513,65 @@ const ApproveRecords: React.FC = () => {
                 size='sm'
                 variant='secondary'
                 onClick={() => navigateDate('prev')}
-                className='px-3'
+                disabled={isPrevDisabled}
+                className='px-3 shrink-0'
               >
                 Previous
               </Button>
-              <Input
-                type='text'
-                value={displayDate}
-                placeholder='dd/MM/yyyy'
-                onChange={value => {
-                  setDisplayDate(value);
-                  const internal = convertToInternalFormat(value);
-                  if (internal) {
-                    handleFilterChange('date', internal);
-                  }
-                }}
-                className='flex-1 w-full'
-              />
+              <div className='relative flex-1 w-full'>
+                <input
+                  type='text'
+                  value={displayDate}
+                  placeholder='dd/MM/yyyy'
+                  onChange={(e) => {
+                    const inputValue = e.target.value;
+                    setDisplayDate(inputValue);
+                    const internalDate = convertToInternalFormat(inputValue);
+                    if (inputValue.match(/^\d{2}\/\d{2}\/\d{4}$/) && internalDate) {
+                      setFilters(prev => ({ ...prev, date: internalDate }));
+                    }
+                  }}
+                  onBlur={(e) => {
+                    const inputValue = e.target.value;
+                    if (inputValue && inputValue.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+                      const internalDate = convertToInternalFormat(inputValue);
+                      if (internalDate) {
+                        setFilters(prev => ({ ...prev, date: internalDate }));
+                      }
+                    } else if (inputValue) {
+                      const currentDate = format(new Date(), 'yyyy-MM-dd');
+                      setFilters(prev => ({ ...prev, date: currentDate }));
+                    }
+                  }}
+                  className='w-full border border-gray-300 rounded-lg px-3 py-1.5 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm'
+                />
+                <button
+                  type='button'
+                  onClick={() => setShowCalendar(!showCalendar)}
+                  className='absolute right-2 top-1/2 transform -translate-y-1/2 p-1 hover:bg-gray-100 rounded text-gray-500'
+                >
+                  <Calendar className='w-4 h-4' />
+                </button>
+                {showCalendar && (
+                  <CustomCalendar
+                    entries={allPendingEntries}
+                    onDateSelect={(date) => {
+                      handleDatePickerChange(date);
+                      setShowCalendar(false);
+                    }}
+                    selectedDate={filters.date}
+                    onClose={() => setShowCalendar(false)}
+                    dotColor="red"
+                    tooltipLabel="Pending Approvals"
+                  />
+                )}
+              </div>
               <Button
                 size='sm'
                 variant='secondary'
                 onClick={() => navigateDate('next')}
-                className='px-3'
+                disabled={isNextDisabled}
+                className='px-3 shrink-0'
               >
                 Next
               </Button>
@@ -1689,6 +1820,9 @@ const ApproveRecords: React.FC = () => {
                     Entry Date & Time
                   </th>
                   <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Status
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
                     Actions
                   </th>
                 </tr>
@@ -1696,7 +1830,7 @@ const ApproveRecords: React.FC = () => {
               <tbody>
                 {getCurrentPageEntries().length === 0 ? (
                   <tr>
-                    <td colSpan={13} className='text-center py-8 text-gray-500'>
+                    <td colSpan={14} className='text-center py-8 text-gray-500'>
                       No pending records found matching the selected filters.
                     </td>
                   </tr>
@@ -1704,10 +1838,10 @@ const ApproveRecords: React.FC = () => {
                   getCurrentPageEntries().map((entry, index) => (
                     <tr
                       key={entry.id}
-                      className={`border-b hover:bg-gray-50 transition-colors ${
-                        entry.approved !== true && entry.approved !== 'true' && entry.approved !== 'rejected'
-                          ? 'bg-orange-50' // Orange background for pending records
-                          : index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                      className={`border-b transition-colors cursor-pointer ${
+                        entry.edited === true || entry.edited === 'true'
+                          ? 'bg-[#FDE7F3] hover:bg-[#FBCFE8]'
+                          : 'bg-orange-50 hover:bg-orange-100'
                       }`}
                       onClick={e => {
                         if (
@@ -1720,6 +1854,13 @@ const ApproveRecords: React.FC = () => {
                         }
                         handleSelectEntry(entry.id);
                       }}
+                      onDoubleClick={() => {
+                        setViewEntry(entry);
+                        setViewDraft({ ...entry });
+                        setViewEditing(false);
+                        setViewOpen(true);
+                      }}
+                      title="Double click to view details"
                     >
                       <td className='px-3 py-2'>
                         <input
@@ -1732,7 +1873,7 @@ const ApproveRecords: React.FC = () => {
                           className='h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded'
                         />
                       </td>
-                      <td className='px-3 py-2 font-medium'>{index + 1}</td>
+                      <td className='px-3 py-2 font-medium'>{index + 1 + (currentPage - 1) * recordsPerPage}</td>
                       <td className='px-3 py-2'>
                         {format(new Date(entry.c_date), 'dd/MM/yyyy')}
                       </td>
@@ -1760,19 +1901,46 @@ const ApproveRecords: React.FC = () => {
                       <td className='px-3 py-2'>{entry.staff}</td>
                       <td className='px-3 py-2'>{entry.users}</td>
                       <td className='px-3 py-2'>
-                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'HH:mm:ss')}`}
+                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'hh:mm:ss a')}`}
                       </td>
                       <td className='px-3 py-2'>
-                        <Button
-                          variant='secondary'
-                          onClick={() => {
-                            handleDirectApprove(entry.id);
-                          }}
-                          disabled={entry.approved === true}
-                          className='text-xs px-2 py-1'
-                        >
-                          Approve
-                        </Button>
+                        {entry.edited === true || entry.edited === 'true' ? (
+                          <span className='inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-pink-100 text-pink-800 border border-pink-200'>
+                            ✏️ Edited
+                          </span>
+                        ) : (
+                          <span className='inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 border border-orange-200'>
+                            📝 New
+                          </span>
+                        )}
+                      </td>
+                      <td className='px-3 py-2'>
+                        <div className='flex gap-1.5'>
+                          <Button
+                            variant='secondary'
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewEntry(entry);
+                              setViewDraft({ ...entry });
+                              setViewEditing(false);
+                              setViewOpen(true);
+                            }}
+                            className='text-xs px-2 py-1'
+                          >
+                            View
+                          </Button>
+                          <Button
+                            variant='secondary'
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDirectApprove(entry.id);
+                            }}
+                            disabled={entry.approved === true}
+                            className='text-xs px-2 py-1'
+                          >
+                            Approve
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1806,7 +1974,7 @@ const ApproveRecords: React.FC = () => {
                 <p className='text-sm text-gray-700'>
                   Showing{' '}
                   <span className='font-semibold'>
-                    {currentPage * recordsPerPage - recordsPerPage + 1}
+                    {filteredEntries.length === 0 ? 0 : (currentPage * recordsPerPage - recordsPerPage + 1)}
                   </span>{' '}
                   to{' '}
                   <span className='font-semibold'>
@@ -1898,6 +2066,9 @@ const ApproveRecords: React.FC = () => {
                     Entry Date & Time
                   </th>
                   <th className='px-3 py-2 text-left font-medium text-gray-700'>
+                    Status
+                  </th>
+                  <th className='px-3 py-2 text-left font-medium text-gray-700'>
                     Actions
                   </th>
                 </tr>
@@ -1905,7 +2076,7 @@ const ApproveRecords: React.FC = () => {
               <tbody>
                 {getApprovedPageEntries().length === 0 ? (
                   <tr>
-                    <td colSpan={12} className='text-center py-8 text-gray-500'>
+                    <td colSpan={13} className='text-center py-8 text-gray-500'>
                       No approved records found matching the selected filters.
                     </td>
                   </tr>
@@ -1913,11 +2084,18 @@ const ApproveRecords: React.FC = () => {
                   getApprovedPageEntries().map((entry, index) => (
                     <tr
                       key={entry.id}
-                      className={`border-b hover:bg-gray-50 transition-colors ${
-                        index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                      className={`border-b transition-colors cursor-pointer ${
+                        index % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-25 hover:bg-gray-50'
                       }`}
+                      onDoubleClick={() => {
+                        setViewEntry(entry);
+                        setViewDraft({ ...entry });
+                        setViewEditing(false);
+                        setViewOpen(true);
+                      }}
+                      title="Double click to view details"
                     >
-                      <td className='px-3 py-2 font-medium'>{index + 1}</td>
+                      <td className='px-3 py-2 font-medium'>{index + 1 + (approvedPage - 1) * recordsPerPage}</td>
                       <td className='px-3 py-2'>
                         {format(new Date(entry.c_date), 'dd/MM/yyyy')}
                       </td>
@@ -1945,18 +2123,39 @@ const ApproveRecords: React.FC = () => {
                       <td className='px-3 py-2'>{entry.staff}</td>
                       <td className='px-3 py-2'>{entry.users}</td>
                       <td className='px-3 py-2'>
-                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'HH:mm:ss')}`}
+                        {`${format(new Date(entry.c_date), 'dd/MM/yyyy')} ${format(new Date(entry.entry_time), 'hh:mm:ss a')}`}
                       </td>
                       <td className='px-3 py-2'>
-                        <Button
-                          variant='secondary'
-                          onClick={() => {
-                            handleCancelDirectApprove(entry.id);
-                          }}
-                          className='text-xs px-2 py-1'
-                        >
-                          Cancel Approve
-                        </Button>
+                        <span className='inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 border border-green-200'>
+                          ✅ Approved
+                        </span>
+                      </td>
+                      <td className='px-3 py-2'>
+                        <div className='flex gap-1.5'>
+                          <Button
+                            variant='secondary'
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewEntry(entry);
+                              setViewDraft({ ...entry });
+                              setViewEditing(false);
+                              setViewOpen(true);
+                            }}
+                            className='text-xs px-2 py-1'
+                          >
+                            View
+                          </Button>
+                          <Button
+                            variant='secondary'
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCancelDirectApprove(entry.id);
+                            }}
+                            className='text-xs px-2 py-1'
+                          >
+                            Cancel Approve
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1990,7 +2189,7 @@ const ApproveRecords: React.FC = () => {
                 <p className='text-sm text-gray-700'>
                   Showing{' '}
                   <span className='font-semibold'>
-                    {approvedPage * recordsPerPage - recordsPerPage + 1}
+                    {filteredApprovedEntries.length === 0 ? 0 : (approvedPage * recordsPerPage - recordsPerPage + 1)}
                   </span>{' '}
                   to{' '}
                   <span className='font-semibold'>
@@ -2119,8 +2318,10 @@ const ApproveRecords: React.FC = () => {
               </thead>
               <tbody>
                 {filteredDeletedEntries.map((d, index) => (
-                  <tr key={d.id} className={`border-b hover:bg-gray-50 transition-colors ${
-                    d.approved !== true && d.approved !== 'true' && d.approved !== 'rejected' ? 'bg-orange-50' : ''
+                  <tr key={d.id} className={`border-b transition-colors ${
+                    !isApprovedStatus(d.approved) && d.approved !== 'rejected' 
+                      ? 'bg-red-50 hover:bg-red-100' 
+                      : 'hover:bg-gray-50'
                   }`}>
                     <td className='w-12 px-1 py-1 font-medium text-xs'>{index + 1}</td>
                     <td className='w-16 px-1 py-1 text-xs'>
@@ -2151,20 +2352,20 @@ const ApproveRecords: React.FC = () => {
                       {d.users}
                     </td>
                     <td className='w-20 px-1 py-1 text-xs'>
-                      {format(new Date(d.deleted_at), 'HH:mm:ss')}
+                      {format(new Date(d.deleted_at), 'hh:mm:ss a')}
                     </td>
                     <td className='w-20 px-1 py-1 text-center'>
-                      {d.approved === true || d.approved === 'true' ? (
-                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800'>
-                          Approved
+                      {isApprovedStatus(d.approved) ? (
+                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 border border-green-200'>
+                          ✅ Approved
                         </span>
                       ) : d.approved === 'rejected' ? (
-                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800'>
+                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800 border border-gray-200'>
                           Rejected
                         </span>
                       ) : (
-                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800'>
-                          Pending
+                        <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800 border border-red-200 animate-pulse'>
+                          🗑️ Delete Request
                         </span>
                       )}
                     </td>
@@ -2204,7 +2405,14 @@ const ApproveRecords: React.FC = () => {
         <div className='fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4'>
           <div className='bg-white rounded-lg w-full max-w-2xl p-4'>
             <div className='flex items-center justify-between mb-3'>
-              <h3 className='text-lg font-semibold'>Entry Details</h3>
+              <div className='flex items-center gap-2'>
+                <h3 className='text-lg font-semibold'>Entry Details</h3>
+                {(viewEntry.edited === true || viewEntry.edited === 'true') && (
+                  <span className='inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-pink-100 text-pink-800 border border-pink-200 animate-pulse'>
+                    ✏️ Edited Record
+                  </span>
+                )}
+              </div>
               <button onClick={() => setViewOpen(false)} className='text-gray-500'>✕</button>
             </div>
             <div className='grid grid-cols-1 md:grid-cols-2 gap-3'>
@@ -2221,12 +2429,18 @@ const ApproveRecords: React.FC = () => {
               {!viewEditing ? (
                 <>
                   <Button variant='secondary' onClick={() => setViewOpen(false)}>Close</Button>
-                  <Button onClick={() => setViewEditing(true)}>Edit</Button>
+                  {!currentBook?.is_locked && (
+                    <Button onClick={() => setViewEditing(true)}>Edit</Button>
+                  )}
                 </>
               ) : (
                 <>
                   <Button variant='secondary' onClick={() => { setViewEditing(false); setViewDraft({ ...viewEntry }); }}>Cancel</Button>
                   <Button onClick={async () => {
+                    if (currentBook?.is_locked) {
+                      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+                      return;
+                    }
                     try {
                       const saved = await supabaseDB.updateCashBookEntry(viewEntry.id, {
                         c_date: viewDraft.c_date,

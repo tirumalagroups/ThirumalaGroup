@@ -3,22 +3,20 @@ import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
 import Select from '../components/UI/Select';
-import { supabaseDB } from '../lib/supabaseDatabase';
-import { supabase } from '../lib/supabase';
+import { supabaseDB, supabase } from '../lib/supabaseDatabase';
 import { getTableName } from '../lib/tableNames';
 import { exportToExcel, formatDataForExcel } from '../utils/excel';
-import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { useBook } from '../contexts/BookContext';
+import { useTableMode } from '../contexts/TableModeContext';
 import {
-  TrendingUp,
-  TrendingDown,
   FileText,
   Truck,
   CreditCard,
-  Users,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface ExportOptions {
@@ -45,7 +43,8 @@ interface ExportOptions {
 }
 
 const ExportExcel: React.FC = () => {
-  const { user } = useAuth();
+  const { currentBook } = useBook();
+  const { mode: tableMode } = useTableMode();
   const [exportOptions, setExportOptions] = useState<ExportOptions>({
     reportType: 'cashbook',
     dateRange: 'thisMonth',
@@ -74,7 +73,7 @@ const ExportExcel: React.FC = () => {
 
   useEffect(() => {
     loadDropdownData();
-  }, []);
+  }, [currentBook?.id]);
 
   useEffect(() => {
     if (
@@ -110,12 +109,12 @@ const ExportExcel: React.FC = () => {
         .neq('payment_mode', '');
       
       if (!paymentModeError && paymentModeData) {
-        const uniquePaymentModes = [...new Set(
+        const uniquePaymentModes: string[] = [...new Set(
           paymentModeData
-            .map(entry => entry.payment_mode)
-            .filter(mode => mode && String(mode).trim() !== '')
-            .map(mode => String(mode).trim())
-        )].sort();
+            .map((entry: any) => entry.payment_mode)
+            .filter((mode: any) => mode && String(mode).trim() !== '')
+            .map((mode: any) => String(mode).trim())
+        )].sort() as string[];
         
         // Helper function to map payment mode values to display labels
         const getPaymentModeLabel = (mode: string): string => {
@@ -124,7 +123,7 @@ const ExportExcel: React.FC = () => {
           return mode;
         };
         
-        const paymentModeDataOptions = uniquePaymentModes.map(mode => ({
+        const paymentModeDataOptions = uniquePaymentModes.map((mode: string) => ({
           value: mode,
           label: getPaymentModeLabel(mode),
         }));
@@ -194,71 +193,285 @@ const ExportExcel: React.FC = () => {
     }
   };
 
+  const fetchFilteredCashBookEntries = async (filters: {
+    fromDate: string;
+    toDate: string;
+    companyFilter?: string;
+    accountFilter?: string;
+    paymentModeFilter?: string;
+  }) => {
+    let allEntries: any[] = [];
+    let offset = 0;
+    const limit = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      let query = supabase
+        .from('cash_book')
+        .select('*')
+        .gte('c_date', filters.fromDate)
+        .lte('c_date', filters.toDate);
+
+      if (filters.companyFilter) {
+        query = query.eq('company_name', filters.companyFilter);
+      }
+      if (filters.accountFilter) {
+        query = query.eq('acc_name', filters.accountFilter);
+      }
+      if (filters.paymentModeFilter) {
+        query = query.eq('payment_mode', filters.paymentModeFilter);
+      }
+
+      // Sort by date ascending
+      query = query.order('c_date', { ascending: true })
+                   .order('created_at', { ascending: true })
+                   .range(offset, offset + limit - 1);
+
+      const { data, error } = await query;
+      if (error) {
+        console.error('Error fetching data for export:', error);
+        throw error;
+      }
+
+      if (data && data.length > 0) {
+        allEntries = [...allEntries, ...data];
+        if (data.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return allEntries.map(entry => {
+      let paymentMode = '';
+      if (entry.payment_mode != null && entry.payment_mode !== undefined) {
+        const pmStr = String(entry.payment_mode).trim();
+        if (pmStr && pmStr !== 'null' && pmStr !== 'undefined' && pmStr !== '') {
+          paymentMode = pmStr;
+        }
+      }
+      if (!paymentMode) {
+        if (entry.credit_mode != null && entry.credit_mode !== '') {
+          paymentMode = String(entry.credit_mode).trim();
+        } else if (entry.debit_mode != null && entry.debit_mode !== '') {
+          paymentMode = String(entry.debit_mode).trim();
+        }
+      }
+
+      return {
+        ...entry,
+        acc_name: entry.acc_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
+        sub_acc_name: entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
+        particulars: entry.particulars?.replace(/\[DELETED\]\s*/g, '').trim() || '',
+        company_name: entry.company_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
+        approved: entry.approved === true || (typeof entry.approved === 'string' && ['true', 'approved'].includes(entry.approved.toLowerCase().trim())),
+        payment_mode: paymentMode
+      };
+    });
+  };
+
+  const aggregateLedgerData = (entries: any[]) => {
+    const accountMap = new Map<string, {
+      acc_name: string;
+      credit: number;
+      debit: number;
+      balance: number;
+      yes_no: string;
+    }>();
+
+    entries.forEach(entry => {
+      const accName = entry.acc_name || 'Unknown';
+      if (!accountMap.has(accName)) {
+        accountMap.set(accName, {
+          acc_name: accName,
+          credit: 0,
+          debit: 0,
+          balance: 0,
+          yes_no: '',
+        });
+      }
+      const acc = accountMap.get(accName)!;
+      acc.credit += entry.credit || 0;
+      acc.debit += entry.debit || 0;
+    });
+
+    return Array.from(accountMap.values()).map(acc => {
+      acc.balance = acc.credit - acc.debit;
+      acc.yes_no = acc.balance >= 0 ? 'CREDIT' : 'DEBIT';
+      return acc;
+    });
+  };
+
+  const aggregateBalanceSheetData = (entries: any[]) => {
+    const accountMap = new Map<string, {
+      acc_name: string;
+      credit: number;
+      debit: number;
+      balance: number;
+      yes_no: string;
+      result: string;
+    }>();
+
+    entries.forEach(entry => {
+      const accName = entry.acc_name || 'Unknown';
+      if (!accountMap.has(accName)) {
+        accountMap.set(accName, {
+          acc_name: accName,
+          credit: 0,
+          debit: 0,
+          balance: 0,
+          yes_no: getAccountPLStatus(accName),
+          result: '',
+        });
+      }
+      const acc = accountMap.get(accName)!;
+      acc.credit += entry.credit || 0;
+      acc.debit += entry.debit || 0;
+    });
+
+    return Array.from(accountMap.values()).map(acc => {
+      acc.balance = acc.credit - acc.debit;
+      acc.result = acc.balance >= 0 ? 'CREDIT' : 'DEBIT';
+      return acc;
+    });
+  };
+
+  const getAccountPLStatus = (accountName: string): string => {
+    const plAccounts = ['SALES', 'PURCHASE', 'EXPENSE', 'INCOME', 'REVENUE'];
+    const isPlAccount = plAccounts.some(type =>
+      accountName.toUpperCase().includes(type)
+    );
+    return isPlAccount ? 'YES' : 'NO';
+  };
+
   const getDataForExport = async () => {
     const dateRange = getDateRange();
 
     switch (exportOptions.reportType) {
-      case 'cashbook':
-        let entries = await supabaseDB.getAllCashBookEntries();
-        entries = entries.filter(
-          entry =>
-            entry.c_date >= dateRange.from && entry.c_date <= dateRange.to
-        );
-
-        if (exportOptions.companyFilter) {
-          entries = entries.filter(
-            entry => entry.company_name === exportOptions.companyFilter
-          );
-        }
-        if (exportOptions.accountFilter) {
-          entries = entries.filter(
-            entry => entry.acc_name === exportOptions.accountFilter
-          );
-        }
-        if (exportOptions.paymentModeFilter) {
-          entries = entries.filter(entry => {
-            const entryPaymentMode = entry.payment_mode ? String(entry.payment_mode).trim() : '';
-            return entryPaymentMode === exportOptions.paymentModeFilter;
-          });
-        }
-
+      case 'cashbook': {
+        const entries = await fetchFilteredCashBookEntries({
+          fromDate: dateRange.from,
+          toDate: dateRange.to,
+          companyFilter: exportOptions.companyFilter || undefined,
+          accountFilter: exportOptions.accountFilter || undefined,
+          paymentModeFilter: exportOptions.paymentModeFilter || undefined,
+        });
         return formatDataForExcel(entries, 'cashbook');
+      }
 
-      case 'ledger':
-        const ledgerData = await supabaseDB.getAllCashBookEntries();
-        let filteredLedgerData = ledgerData.filter(
-          entry =>
-            entry.c_date >= dateRange.from && entry.c_date <= dateRange.to
-        );
-        if (exportOptions.paymentModeFilter) {
-          filteredLedgerData = filteredLedgerData.filter(entry => {
-            const entryPaymentMode = entry.payment_mode ? String(entry.payment_mode).trim() : '';
-            return entryPaymentMode === exportOptions.paymentModeFilter;
-          });
-        }
-        return formatDataForExcel(filteredLedgerData, 'ledger');
+      case 'ledger': {
+        const entries = await fetchFilteredCashBookEntries({
+          fromDate: dateRange.from,
+          toDate: dateRange.to,
+          companyFilter: exportOptions.companyFilter || undefined,
+          accountFilter: exportOptions.accountFilter || undefined,
+          paymentModeFilter: exportOptions.paymentModeFilter || undefined,
+        });
+        const aggregated = aggregateLedgerData(entries);
+        return formatDataForExcel(aggregated, 'ledger');
+      }
 
-      case 'balancesheet':
-        const balanceData = await supabaseDB.getAllCashBookEntries();
-        const filteredBalanceData = balanceData.filter(
-          entry =>
-            entry.c_date >= dateRange.from && entry.c_date <= dateRange.to
-        );
-        return formatDataForExcel(filteredBalanceData, 'balancesheet');
+      case 'balancesheet': {
+        const entries = await fetchFilteredCashBookEntries({
+          fromDate: dateRange.from,
+          toDate: dateRange.to,
+          companyFilter: exportOptions.companyFilter || undefined,
+          accountFilter: exportOptions.accountFilter || undefined,
+        });
+        const aggregated = aggregateBalanceSheetData(entries);
+        return formatDataForExcel(aggregated, 'balancesheet');
+      }
 
-      case 'vehicles':
+      case 'vehicles': {
         const vehicleData = await supabaseDB.getVehicles();
         return formatDataForExcel(vehicleData, 'vehicles');
+      }
 
-      case 'bankguarantees':
+      case 'bankguarantees': {
         const bgData = await supabaseDB.getBankGuarantees();
         return formatDataForExcel(bgData, 'bankguarantees');
+      }
 
-      case 'drivers':
+      case 'drivers': {
         const driverData = await supabaseDB.getDrivers();
         return formatDataForExcel(driverData, 'drivers');
+      }
 
-      case 'editedrecords':
+      case 'dailyreport': {
+        const entries = await fetchFilteredCashBookEntries({
+          fromDate: dateRange.from,
+          toDate: dateRange.to,
+          companyFilter: exportOptions.companyFilter || undefined,
+          accountFilter: exportOptions.accountFilter || undefined,
+          paymentModeFilter: exportOptions.paymentModeFilter || undefined,
+        });
+        return entries.map(item => ({
+          'S.No': item.sno,
+          Date: item.c_date,
+          Company: item.company_name,
+          Account: item.acc_name,
+          'Sub Account': item.sub_acc_name || '',
+          Particulars: item.particulars,
+          Credit: item.credit || 0,
+          Debit: item.debit || 0,
+          'Sale Qty': item.sale_qty || 0,
+          'Purchase Qty': item.purchase_qty || 0,
+          Staff: item.staff || '',
+          User: item.users || '',
+        }));
+      }
+
+      case 'ledgersummary': {
+        const entries = await fetchFilteredCashBookEntries({
+          fromDate: dateRange.from,
+          toDate: dateRange.to,
+          companyFilter: exportOptions.companyFilter || undefined,
+          accountFilter: exportOptions.accountFilter || undefined,
+          paymentModeFilter: exportOptions.paymentModeFilter || undefined,
+        });
+
+        const summaryMap = new Map<string, {
+          company: string;
+          account: string;
+          subAccount: string;
+          credit: number;
+          debit: number;
+        }>();
+
+        entries.forEach(entry => {
+          const comp = entry.company_name || 'Unknown Company';
+          const acc = entry.acc_name || 'Unknown Account';
+          const sub = entry.sub_acc_name || '';
+          const key = `${comp}|||${acc}|||${sub}`;
+
+          if (!summaryMap.has(key)) {
+            summaryMap.set(key, {
+              company: comp,
+              account: acc,
+              subAccount: sub,
+              credit: 0,
+              debit: 0,
+            });
+          }
+          const item = summaryMap.get(key)!;
+          item.credit += entry.credit || 0;
+          item.debit += entry.debit || 0;
+        });
+
+        return Array.from(summaryMap.values()).map(item => ({
+          'Company Name': item.company,
+          'Main Account': item.account,
+          'Sub Account': item.subAccount,
+          'Credit': item.credit,
+          'Debit': item.debit,
+          'Balance': item.credit - item.debit,
+        }));
+      }
+
+      case 'editedrecords': {
         const editedRecords = await supabaseDB.getEditAuditLog();
         const formattedEditedData = editedRecords.map((log: any, idx: number) => {
           const oldObj = log.old_values ? (typeof log.old_values === 'string' ? JSON.parse(log.old_values) : log.old_values) : {};
@@ -290,8 +503,9 @@ const ExportExcel: React.FC = () => {
           };
         });
         return formattedEditedData;
+      }
 
-      case 'deletedrecords':
+      case 'deletedrecords': {
         const deletedRecords = await supabaseDB.getDeletedCashBook();
         const formattedDeletedData = deletedRecords.map((record: any, idx: number) => ({
           'S.No': idx + 1,
@@ -313,23 +527,26 @@ const ExportExcel: React.FC = () => {
           'Deleted At': record.deleted_at ? format(new Date(record.deleted_at), 'dd/MM/yyyy HH:mm') : '',
         }));
         return formattedDeletedData;
+      }
 
       default:
         return [];
     }
   };
 
-  const exportToCSV = (data: any[], filename: string) => {
+  const exportToCSV = (data: any[], filename: string, options?: { skipHeader?: boolean }) => {
     if (!data || data.length === 0) {
       toast.error('No data to export as CSV');
       return;
     }
     const headers = Object.keys(data[0]);
-    const csvRows = [headers.join(',')];
+    const csvRows = [];
+    if (!options?.skipHeader) {
+      csvRows.push(headers.join(','));
+    }
     data.forEach(row => {
       const values = headers.map(header => {
         const val = row[header];
-        // Escape quotes and commas
         if (typeof val === 'string') {
           return '"' + val.replace(/"/g, '""') + '"';
         }
@@ -351,11 +568,41 @@ const ExportExcel: React.FC = () => {
   const handleExport = async () => {
     setLoading(true);
     try {
-      const data = await getDataForExport();
+      let data = await getDataForExport();
       if (data.length === 0) {
         toast.error('No data found for the selected criteria');
         return;
       }
+
+      if (exportOptions.includeTotals && data.length > 0) {
+        const totalsRow: any = {};
+        const firstKey = Object.keys(data[0])[0];
+        totalsRow[firstKey] = 'TOTALS';
+
+        Object.keys(data[0]).slice(1).forEach(key => {
+          totalsRow[key] = '';
+        });
+
+        const columnsToSum = [
+          'Credit',
+          'Debit',
+          'Balance',
+          'Sale Qty',
+          'Purchase Qty',
+          'Sale Quantity',
+          'Purchase Quantity'
+        ];
+
+        columnsToSum.forEach(col => {
+          if (col in data[0]) {
+            const sum = data.reduce((acc, row) => acc + (parseFloat(row[col]) || 0), 0);
+            totalsRow[col] = sum;
+          }
+        });
+
+        data = [...data, totalsRow];
+      }
+
       const dateRange = getDateRange();
       let filename = '';
       if (exportOptions.reportType === 'editedrecords') {
@@ -365,12 +612,18 @@ const ExportExcel: React.FC = () => {
       } else {
         filename = `${exportOptions.reportType}-${dateRange.from}-to-${dateRange.to}`;
       }
+
       if (exportOptions.format === 'pdf') {
         exportToPDF(data, filename, exportOptions.reportType);
       } else if (exportOptions.format === 'csv') {
-        exportToCSV(data, filename);
+        exportToCSV(data, filename, { skipHeader: !exportOptions.includeHeaders });
       } else {
-        const result = exportToExcel(data, filename, exportOptions.reportType);
+        const result = exportToExcel(
+          data,
+          filename,
+          exportOptions.reportType,
+          { skipHeader: !exportOptions.includeHeaders }
+        );
         if (result.success) {
           toast.success(`Export completed! File: ${filename}.xlsx`);
         } else {
@@ -429,6 +682,7 @@ const ExportExcel: React.FC = () => {
             head: [headers],
             body: tableData,
             startY: 50,
+            showHead: (exportOptions.includeHeaders ? 'every' : 'never') as any,
             styles: {
               fontSize: 8,
               cellPadding: 2,
@@ -485,24 +739,7 @@ const ExportExcel: React.FC = () => {
     }));
   };
 
-  const getReportTypeIcon = (type: string) => {
-    switch (type) {
-      case 'cashbook':
-        return FileText;
-      case 'ledger':
-        return TrendingUp;
-      case 'balancesheet':
-        return TrendingDown;
-      case 'vehicles':
-        return Truck;
-      case 'bankguarantees':
-        return CreditCard;
-      case 'drivers':
-        return Users;
-      default:
-        return FileText;
-    }
-  };
+
 
   const reportTypes = [
     { value: 'cashbook', label: 'Cash Book Entries', icon: undefined },
@@ -528,6 +765,37 @@ const ExportExcel: React.FC = () => {
   return (
     <div className='min-h-screen flex flex-col'>
       <div className='max-w-5xl w-full mx-auto space-y-6'>
+        {/* Locked Book Banner */}
+        {currentBook?.is_locked && (
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+            <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+            <div>
+              <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+              <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+            </div>
+          </div>
+        )}
+
+        {/* Header */}
+        <div className='flex items-center justify-between'>
+          <div>
+            <div className='flex items-center gap-3 mb-1'>
+              <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+                Export Data
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                  currentBook?.is_locked 
+                    ? 'bg-red-100 text-red-700' 
+                    : tableMode === 'itr' 
+                      ? 'bg-emerald-100 text-emerald-700' 
+                      : 'bg-blue-100 text-blue-700'
+                }`}>
+                  {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+                </span>
+              </h1>
+            </div>
+            <p className='text-gray-600'>Export data from database to Excel, CSV, or PDF formats</p>
+          </div>
+        </div>
         {/* Responsive export controls */}
         <div className='flex flex-col md:flex-row gap-4 items-end'>
           {/* Report Type */}

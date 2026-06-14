@@ -1,16 +1,16 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
-import Input from '../components/UI/Input';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
-import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
-import { format, parseISO } from 'date-fns';
-import { Calendar, Search } from 'lucide-react';
+import { format } from 'date-fns';
+import { Calendar, Search, AlertTriangle } from 'lucide-react';
 import CustomCalendar from '../components/UI/CustomCalendar';
+import { getSharedPrintStyles } from '../utils/print';
+import { useBook } from '../contexts/BookContext';
 
 interface LedgerSummaryFilters {
   betweenDates: boolean;
@@ -49,8 +49,8 @@ interface SubAccountSummary {
 }
 
 const LedgerSummary: React.FC = () => {
-  const { user } = useAuth();
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
 
   const [filters, setFilters] = useState<LedgerSummaryFilters>({
     betweenDates: true,
@@ -142,8 +142,6 @@ const LedgerSummary: React.FC = () => {
   // Visible dd/MM/yyyy inputs + hidden pickers
   const [fromDateInput, setFromDateInput] = useState('');
   const [toDateInput, setToDateInput] = useState('');
-  const fromPickerRef = useRef<HTMLInputElement>(null);
-  const toPickerRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -167,7 +165,7 @@ const LedgerSummary: React.FC = () => {
       }
     };
     loadAllEntries();
-  }, [tableMode]);
+  }, [tableMode, currentBook?.id]);
 
   // Summary totals
   const [grandTotals, setGrandTotals] = useState({
@@ -179,13 +177,13 @@ const LedgerSummary: React.FC = () => {
 
   useEffect(() => {
     generateSummary();
-  }, []);
+  }, [currentBook?.id]);
 
   // Implement live filtering: call generateSummary automatically when filters change
   useEffect(() => {
     generateSummary();
     // eslint-disable-next-line
-  }, [filters, activeTab]);
+  }, [filters, activeTab, currentBook?.id]);
 
   // Reset child filters if their currently selected values are no longer available in the dynamically filtered lists
   useEffect(() => {
@@ -477,109 +475,7 @@ const LedgerSummary: React.FC = () => {
     });
   };
 
-  const refreshData = () => {
-    generateSummary();
-    toast.success('Data refreshed successfully!');
-  };
 
-  const resetFilters = () => {
-    setFilters({
-      betweenDates: true,
-      fromDate: '2016-10-31',
-      toDate: format(new Date(), 'yyyy-MM-dd'),
-      companyName: '',
-      mainAccount: '',
-      subAccount: '',
-      staff: '',
-    });
-    toast.success('Filters reset');
-  };
-
-  const closeFilters = () => {
-    // Just a placeholder for close functionality
-    toast.success('Filters panel closed');
-  };
-
-  const exportToExcel = () => {
-    let exportData: any[] = [];
-    let filename = '';
-
-    switch (activeTab) {
-      case 'company':
-        exportData = companySummaries.map(company => ({
-          'Company Name': company.companyName,
-          'Total Credit': company.totalCredit,
-          'Total Debit': company.totalDebit,
-          Balance: company.balance,
-        }));
-        filename = 'company-wise-summary';
-        break;
-      case 'mainAccount':
-        exportData = mainAccountSummaries.map(account => {
-          const baseData = {
-            'Account Name': account.accountName,
-            Credit: account.credit,
-            Debit: account.debit,
-            Balance: account.balance,
-            'Transaction Count': account.transactionCount,
-          };
-          
-          // Add company name column if no company filter is applied
-          if (!filters.companyName && (account as any).companyName) {
-            return {
-              'Company Name': (account as any).companyName,
-              ...baseData,
-            };
-          }
-          
-          return baseData;
-        });
-        filename = 'main-account-summary';
-        break;
-      case 'subAccount':
-        exportData = subAccountSummaries.map(subAccount => {
-          const baseData = {
-            'Main Account': subAccount.mainAccount || '-',
-            'Sub Account': subAccount.subAccount,
-            Credit: subAccount.credit,
-            Debit: subAccount.debit,
-            Balance: subAccount.balance,
-            'Transaction Count': subAccount.transactionCount,
-          };
-          
-          // Add company name column if no company filter is applied
-          if (!filters.companyName && subAccount.companyName) {
-            return {
-              'Company Name': subAccount.companyName,
-              ...baseData,
-            };
-          }
-          
-          return baseData;
-        });
-        filename = 'sub-account-summary';
-        break;
-    }
-
-    // Create CSV content
-    const headers = Object.keys(exportData[0] || {});
-    const csvContent = [
-      headers.join(','),
-      ...exportData.map(row =>
-        headers.map(header => `"${row[header]}"`).join(',')
-      ),
-    ].join('\n');
-
-    // Download file
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${filename}-${format(new Date(), 'yyyy-MM-dd')}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Summary exported successfully!');
-  };
 
   const handleRealPrint = () => {
     // Create a print-friendly version
@@ -593,12 +489,6 @@ const LedgerSummary: React.FC = () => {
     const toFormatted = format(new Date(filters.toDate), 'dd/MM/yyyy');
 
     const currentData = getCurrentData();
-    const title =
-      activeTab === 'company'
-        ? 'Company Summary'
-        : activeTab === 'mainAccount'
-          ? 'Main Account Summary'
-          : 'Sub Account Summary';
 
     // Calculate totals for the current data
     const totals = currentData.reduce((acc, item) => {
@@ -650,10 +540,11 @@ const LedgerSummary: React.FC = () => {
               body { margin: 0; }
               .no-print { display: none; }
               @page {
-                size: auto;
-                margin: 10mm 15mm;
+                size: portrait;
+                margin: 8mm;
               }
             }
+            ${getSharedPrintStyles({ isLandscape: false })}
           </style>
         </head>
         <body>
@@ -691,17 +582,17 @@ const LedgerSummary: React.FC = () => {
               <tr>
                 ${activeTab === 'subAccount' ? 
                   (!filters.companyName ? 
-                    '<th>Company Name</th><th>Main Account</th><th>Sub Account</th>' :
-                    '<th>Main Account</th><th>Sub Account</th>') : 
+                    '<th class="col-company">Company Name</th><th class="col-account">Main Account</th><th class="col-sub-account">Sub Account</th>' :
+                    '<th class="col-account">Main Account</th><th class="col-sub-account">Sub Account</th>') : 
                   activeTab === 'company' ? 
-                    '<th>Company Name</th>' :
+                    '<th class="col-company">Company Name</th>' :
                     !filters.companyName ? 
-                      '<th>Company Name</th><th>Main Account</th>' :
-                      '<th>Main Account</th>'
+                      '<th class="col-company">Company Name</th><th class="col-account">Main Account</th>' :
+                      '<th class="col-account">Main Account</th>'
                 }
-                <th class="text-right">Credit</th>
-                <th class="text-right">Debit</th>
-                <th class="text-right">Balance</th>
+                <th class="col-credit text-right">Credit</th>
+                <th class="col-debit text-right">Debit</th>
+                <th class="col-balance text-right">Balance</th>
               </tr>
             </thead>
             <tbody>
@@ -717,15 +608,15 @@ const LedgerSummary: React.FC = () => {
                     if (activeTab === 'subAccount') {
                       const subAccount = item as SubAccountSummary;
                       const companyCell = !filters.companyName && subAccount.companyName ? 
-                        `<td>${subAccount.companyName}</td>` : '';
+                        `<td class="col-company">${subAccount.companyName}</td>` : '';
                       return `
                 <tr>
                   ${companyCell}
-                  <td>${subAccount.mainAccount || '-'}</td>
-                  <td>${subAccount.subAccount}</td>
-                  <td class="text-right text-green">${credit.toLocaleString()}</td>
-                  <td class="text-right text-red">${debit.toLocaleString()}</td>
-                  <td class="text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
+                  <td class="col-account">${subAccount.mainAccount || '-'}</td>
+                  <td class="col-sub-account">${subAccount.subAccount}</td>
+                  <td class="col-credit text-right text-green">${credit.toLocaleString()}</td>
+                  <td class="col-debit text-right text-red">${debit.toLocaleString()}</td>
+                  <td class="col-balance text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
 ${Math.abs(balance).toLocaleString()}
                     ${balance >= 0 ? ' CR' : ' DR'}
                   </td>
@@ -736,10 +627,10 @@ ${Math.abs(balance).toLocaleString()}
                         const company = item as CompanySummary;
                         return `
                   <tr>
-                    <td>${company.companyName}</td>
-                    <td class="text-right text-green">${credit.toLocaleString()}</td>
-                    <td class="text-right text-red">${debit.toLocaleString()}</td>
-                    <td class="text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
+                    <td class="col-company">${company.companyName}</td>
+                    <td class="col-credit text-right text-green">${credit.toLocaleString()}</td>
+                    <td class="col-debit text-right text-red">${debit.toLocaleString()}</td>
+                    <td class="col-balance text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
 ${Math.abs(balance).toLocaleString()}
                       ${balance >= 0 ? ' CR' : ' DR'}
                     </td>
@@ -750,11 +641,11 @@ ${Math.abs(balance).toLocaleString()}
                         if (!filters.companyName && (account as any).companyName) {
                           return `
                     <tr>
-                      <td>${(account as any).companyName}</td>
-                      <td>${account.accountName}</td>
-                      <td class="text-right text-green">${credit.toLocaleString()}</td>
-                      <td class="text-right text-red">${debit.toLocaleString()}</td>
-                      <td class="text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
+                      <td class="col-company">${(account as any).companyName}</td>
+                      <td class="col-account">${account.accountName}</td>
+                      <td class="col-credit text-right text-green">${credit.toLocaleString()}</td>
+                      <td class="col-debit text-right text-red">${debit.toLocaleString()}</td>
+                      <td class="col-balance text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
 ${Math.abs(balance).toLocaleString()}
                         ${balance >= 0 ? ' CR' : ' DR'}
                       </td>
@@ -763,10 +654,10 @@ ${Math.abs(balance).toLocaleString()}
                         } else {
                           return `
                     <tr>
-                      <td>${account.accountName}</td>
-                      <td class="text-right text-green">${credit.toLocaleString()}</td>
-                      <td class="text-right text-red">${debit.toLocaleString()}</td>
-                      <td class="text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
+                      <td class="col-account">${account.accountName}</td>
+                      <td class="col-credit text-right text-green">${credit.toLocaleString()}</td>
+                      <td class="col-debit text-right text-red">${debit.toLocaleString()}</td>
+                      <td class="col-balance text-right ${balance >= 0 ? 'text-green' : 'text-red'}">
 ${Math.abs(balance).toLocaleString()}
                         ${balance >= 0 ? ' CR' : ' DR'}
                       </td>
@@ -1084,10 +975,33 @@ ${Math.abs(balance).toLocaleString()}
   return (
     <div className='space-y-6'>
       <ModeLabel />
+
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
-          <h1 className='text-3xl font-bold text-gray-900'>Ledger Summary</h1>
+          <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+            Ledger Summary
+            <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+              currentBook?.is_locked 
+                ? 'bg-red-100 text-red-700' 
+                : tableMode === 'itr' 
+                  ? 'bg-emerald-100 text-emerald-700' 
+                  : 'bg-blue-100 text-blue-700'
+            }`}>
+              {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+            </span>
+          </h1>
           <p className='text-gray-600'>
             Comprehensive financial summary with company, account, and
             sub-account analysis
@@ -1228,6 +1142,7 @@ ${Math.abs(balance).toLocaleString()}
               onChange={value => handleFilterChange('companyName', value)}
               options={companyOptions}
               placeholder='Search company...'
+              allowCopy
             />
 
             <SearchableSelect
@@ -1236,6 +1151,7 @@ ${Math.abs(balance).toLocaleString()}
               onChange={value => handleFilterChange('mainAccount', value)}
               options={accountOptions}
               placeholder='Search main account...'
+              allowCopy
             />
 
             <SearchableSelect
@@ -1244,6 +1160,7 @@ ${Math.abs(balance).toLocaleString()}
               onChange={value => handleFilterChange('subAccount', value)}
               options={subAccountOptions}
               placeholder='Search sub account...'
+              allowCopy
             />
 
             <SearchableSelect
@@ -1252,6 +1169,7 @@ ${Math.abs(balance).toLocaleString()}
               onChange={value => handleFilterChange('staff', value)}
               options={staffOptions}
               placeholder='Search staff...'
+              allowCopy
             />
           </div>
 

@@ -10,86 +10,34 @@ const ModeSelection: React.FC = () => {
   const { setMode } = useTableMode();
   const { user } = useAuth();
 
-  // Menu items mapping (same as Sidebar)
-  const menuItems = [
-    { path: '/', key: 'dashboard' },
-    { path: '/new-entry', key: 'new_entry' },
-    { path: '/edit-entry', key: 'edit_entry' },
-    { path: '/daily-report', key: 'daily_report' },
-    { path: '/detailed-ledger', key: 'detailed_ledger' },
-    { path: '/ledger-summary', key: 'ledger_summary' },
-    { path: '/approve-records', key: 'approve_records' },
-    { path: '/edited-records', key: 'edited_records' },
-    { path: '/deleted-records', key: 'deleted_records' },
-    { path: '/replace-form', key: 'replace_form' },
-    { path: '/export-excel', key: 'export' },
-    { path: '/csv-upload', key: 'csv_upload' },
-    { path: '/balance-sheet', key: 'balance_sheet' },
-    { path: '/vehicles', key: 'vehicles' },
-    { path: '/bank-guarantees', key: 'bank_guarantees' },
-    { path: '/drivers', key: 'drivers' },
-    { path: '/user-management', key: 'users', adminOnly: true },
-  ];
-
-  // Get the first available feature path for the user
-  const getFirstAvailableFeature = (mode: 'regular' | 'itr') => {
-    const isAdmin = user?.is_admin || false;
-    const featuresByMode = user?.featuresByMode || {};
-    
-    // Get features for the selected mode
-    const features = isAdmin 
-      ? menuItems.map(item => item.key) // Admins have all features
-      : (featuresByMode[mode] || []);
-    
-    // Find the first menu item that matches a user feature (skip dashboard)
-    for (const item of menuItems) {
-      // Skip admin-only items for non-admins
-      if (item.adminOnly && !isAdmin) continue;
-      
-      // Skip dashboard - we want the first actual feature
-      if (item.key === 'dashboard') continue;
-      
-      // If user has this feature, return its path
-      if (features.includes(item.key)) {
-        return item.path;
-      }
-    }
-    
-    // Fallback to dashboard if no features found (shouldn't happen)
-    return '/';
-  };
 
   const handleRegularMode = () => {
     setMode('regular');
-    const firstFeature = getFirstAvailableFeature('regular');
-    navigate(firstFeature);
+    navigate('/', { replace: true });
   };
 
   const handleITRMode = () => {
     setMode('itr');
-    const firstFeature = getFirstAvailableFeature('itr');
-    navigate(firstFeature);
+    navigate('/', { replace: true });
   };
 
   const handleFinanceMode = () => {
-    // Finance mode - navigate to first available feature
-    setMode('regular'); // Finance uses regular mode
-    const firstFeature = getFirstAvailableFeature('regular');
-    navigate(firstFeature);
+    setMode('finance');
+    navigate('/finance', { replace: true });
   };
 
   // Determine which modes the user can access based on their features
   // Admins have access to all modes
   const isAdmin = user?.is_admin || false;
-  const featuresByMode = user?.featuresByMode || {};
+  const featuresByMode = user?.featuresByMode || { regular: [], itr: [], finance: [] };
   
   // Check if user has features in regular mode
   const hasRegularFeatures = isAdmin || (featuresByMode.regular && featuresByMode.regular.length > 0);
   // Check if user has features in ITR mode
   const hasITRFeatures = isAdmin || (featuresByMode.itr && featuresByMode.itr.length > 0);
   
-  // Show Finance option only for admin users
-  const showFinance = isAdmin;
+  // Show Finance option for admins and users with finance features
+  const showFinance = isAdmin || (featuresByMode.finance && featuresByMode.finance.length > 0);
   
   // Determine grid layout based on number of visible buttons
   const visibleButtons = [hasRegularFeatures, hasITRFeatures, showFinance].filter(Boolean).length;

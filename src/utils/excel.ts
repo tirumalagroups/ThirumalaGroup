@@ -7,14 +7,15 @@ export interface ExcelData {
 export const exportToExcel = (
   data: ExcelData[],
   filename: string,
-  sheetName: string = 'Sheet1'
+  sheetName: string = 'Sheet1',
+  options?: { skipHeader?: boolean }
 ) => {
   try {
     // Create a new workbook
     const workbook = XLSX.utils.book_new();
 
     // Convert data to worksheet
-    const worksheet = XLSX.utils.json_to_sheet(data);
+    const worksheet = XLSX.utils.json_to_sheet(data, options);
 
     // Add worksheet to workbook
     XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
@@ -143,7 +144,7 @@ export const importFromFile = (
 export const validateImportedData = (
   data: ExcelData[],
   requiredFields: string[],
-  optionalFields: string[] = []
+  _optionalFields: string[] = []
 ): { isValid: boolean; errors: string[]; warnings: string[] } => {
   const errors: string[] = [];
   const warnings: string[] = [];

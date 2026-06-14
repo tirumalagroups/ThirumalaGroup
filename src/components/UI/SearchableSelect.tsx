@@ -15,6 +15,7 @@ interface SearchableSelectProps {
   noOptionsMessage?: string;
   size?: 'sm' | 'md' | 'lg';
   tabIndex?: number;
+  allowCopy?: boolean;
 }
 
 const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
@@ -33,9 +34,11 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       noOptionsMessage = 'No options found',
       size = 'md',
       tabIndex,
+      allowCopy = false,
     },
     ref
   ) => {
+    const isFinance = typeof window !== 'undefined' && window.location.pathname.startsWith('/finance');
     const [isOpen, setIsOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -115,6 +118,22 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (disabled) return;
 
+      if (allowCopy && isOpen && searchTerm === '' && displayValue !== '') {
+        // If it's a single printable character key (not Ctrl/Cmd/Alt)
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          const char = isFinance ? e.key.toUpperCase() : e.key;
+          setSearchTerm(char);
+          e.preventDefault();
+          return;
+        }
+        if (e.key === 'Backspace' || e.key === 'Delete') {
+          setSearchTerm('');
+          onChange('');
+          e.preventDefault();
+          return;
+        }
+      }
+
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault();
@@ -192,7 +211,7 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
     };
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const newSearchTerm = e.target.value;
+      const newSearchTerm = isFinance ? e.target.value.toUpperCase() : e.target.value;
       setSearchTerm(newSearchTerm);
       
       // If user is typing and dropdown is closed, open it
@@ -227,10 +246,14 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
       <div className={`relative ${className}`} ref={dropdownRef}>
         {label && (
           <label 
-            className={`block font-bold text-gray-700 mb-1 ${
+            className={isFinance ? `finance-label ${size === 'lg' ? 'text-[14px]' : ''}` : `block font-bold text-gray-700 mb-1 ${
               size === 'sm' ? 'text-xs' : size === 'lg' ? 'text-base' : 'text-sm'
             }`} 
-            style={{ fontFamily: 'Times New Roman', fontSize: '14px', fontWeight: 'bold' }}
+            style={{ 
+              fontFamily: 'Times New Roman', 
+              fontSize: '15px', 
+              fontWeight: 'bold' 
+            }}
           >
             {label}
             {required && <span className='text-red-500 ml-1'>*</span>}
@@ -241,12 +264,19 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
           <input
             ref={inputRef}
             type='text'
-            value={isOpen ? searchTerm : (className.includes('staff-field') ? displayValue.toUpperCase() : displayValue)}
+            value={isOpen && (!allowCopy || searchTerm !== '') ? searchTerm : ((className.includes('staff-field') || isFinance) ? displayValue.toUpperCase() : displayValue)}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             onClick={handleInputClick}
             onFocus={handleFocus}
-            placeholder={isOpen && displayValue ? displayValue : placeholder}
+            onBlur={() => {
+              setTimeout(() => {
+                setIsOpen(false);
+                setSearchTerm('');
+                setHighlightedIndex(-1);
+              }, 150);
+            }}
+            placeholder={isOpen && displayValue && !allowCopy ? displayValue : placeholder}
             disabled={disabled}
             required={required}
             tabIndex={tabIndex}
@@ -254,14 +284,16 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
             aria-expanded={isOpen}
             aria-autocomplete='list'
             aria-controls={isOpen && label ? `${label.replace(/\s+/g, '-').toLowerCase()}-listbox` : undefined}
-            className={`w-full pr-20 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed font-bold ${
+            className={`w-full pr-20 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed font-bold select-text ${
               size === 'sm' ? 'px-2 py-1 text-sm' : size === 'lg' ? 'px-4 py-3 text-lg' : 'px-3 py-2 text-base'
-            } ${className.includes('staff-field') ? 'uppercase' : ''}`}
+            } ${(className.includes('staff-field') || isFinance) ? 'uppercase' : ''}`}
             style={{ 
               fontFamily: 'Times New Roman', 
-              fontSize: '14px',
+              fontSize: '15px',
               fontWeight: 'bold',
-              ...(className.includes('staff-field') ? { textTransform: 'uppercase' } : {})
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              ...((className.includes('staff-field') || isFinance) ? { textTransform: 'uppercase' } : {})
             }}
           />
           
@@ -324,7 +356,7 @@ const SearchableSelect = forwardRef<HTMLInputElement, SearchableSelectProps>(
                   onClick={() => handleSelect(option.value)}
                   onMouseEnter={() => setHighlightedIndex(index)}
                 >
-                  {className.includes('staff-field') ? option.label.toUpperCase() : option.label}
+                  {(className.includes('staff-field') || isFinance) ? option.label.toUpperCase() : option.label}
                 </div>
               ))
             ) : (

@@ -1,0 +1,90 @@
+[
+  {
+    "row_id": "5b72ca91-cd9f-4f47-8c6e-9d16a667066f",
+    "loan_id": "CD027",
+    "receipt_no": "RC034",
+    "entry_date": "2026-06-08",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2026-07-07",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2026-07-08",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "32b76269-79b8-4514-b400-db4ec001dd9e",
+    "loan_id": "CD068",
+    "receipt_no": "RC106",
+    "entry_date": "2025-11-17",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2025-12-16",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2025-12-17",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "35601fba-3f27-4e0d-b821-0f3123d4988e",
+    "loan_id": "CD068",
+    "receipt_no": "RC106",
+    "entry_date": "2025-11-17",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2025-12-16",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2025-12-17",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "053b1977-4490-4805-a985-b9a760bfa41c",
+    "loan_id": "CD072",
+    "receipt_no": "RC138",
+    "entry_date": "2022-08-16",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2022-09-14",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2022-09-15",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "4bbfa088-eda1-4783-a5c3-5465bc01a844",
+    "loan_id": "CD072",
+    "receipt_no": "RC138",
+    "entry_date": "2022-08-16",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2022-09-14",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2022-09-15",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "20b0ed38-0c2a-423b-9dc9-e76cdd8f589e",
+    "loan_id": "CD027",
+    "receipt_no": "RC034",
+    "entry_date": "2026-06-08",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2026-07-07",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2026-07-08",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "73fbba9f-3538-49ef-847b-6e04db9b8b59",
+    "loan_id": "CD067",
+    "receipt_no": "RC095",
+    "entry_date": "2022-03-08",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2022-04-06",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2022-04-07",
+    "status": "VERIFIED_OK"
+  },
+  {
+    "row_id": "a1ad497f-dd64-4892-a689-0c6593ed173b",
+    "loan_id": "CD067",
+    "receipt_no": "RC095",
+    "entry_date": "2022-03-08",
+    "old_renewed_days": 29,
+    "old_renewed_till_date": "2022-04-06",
+    "new_renewed_days": 30,
+    "new_renewed_till_date": "2022-04-07",
+    "status": "VERIFIED_OK"
+  }
+]

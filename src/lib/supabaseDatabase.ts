@@ -1,6 +1,9 @@
-import { supabase } from './supabase';
+import { supabase as rawSupabase, resolveSchemaAndTable } from './supabase';
 import { FinancialCalculator } from './financialCalculations';
 import { getTableName, getTableMode } from './tableNames';
+import { db, QueuedOperation } from './offlineQueueDB';
+import { getCachedMasterData } from './offlineMasterData';
+import { toast } from 'react-hot-toast';
 
 // Types
 export interface Company {
@@ -122,8 +125,615 @@ export interface Driver {
   license_back_url?: string | null;
 }
 
+export interface Reminder {
+  id: string;
+  title: string;
+  description: string | null;
+  event_date: string;
+  event_time: string | null;
+  priority: 'low' | 'medium' | 'high' | 'critical';
+  reminder_type: 'one_time' | 'recurring';
+  recurring_interval: 'daily' | 'weekly' | 'monthly' | 'yearly' | null;
+  notify_before_days: number;
+  assigned_user_id: string | null;
+  status: 'pending' | 'completed';
+  mode: 'regular' | 'itr';
+  category: 'GENERAL' | 'VEHICLE' | 'LOAN' | 'STAFF' | 'DOCUMENT' | 'TAX' | 'MEETING' | 'FOLLOWUP';
+  completion_notes: string | null;
+  completed_at: string | null;
+  snoozed_until: string | null;
+  is_system_generated: boolean;
+  created_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+  deleted_at: string | null;
+  assigned_username?: string | null;
+  creator_username?: string | null;
+  book_id: string | null;
+  play_sound?: boolean;
+  seen?: boolean;
+}
+
+const isScopedTable = (table: string): boolean => {
+  const scopedTables = [
+    'books',
+    'companies',
+    'company_main_accounts',
+    'company_main_sub_acc',
+    'cash_book',
+    'original_cash_book',
+    'edit_cash_book',
+    'deleted_cash_book',
+    'ledger',
+    'balance_sheet',
+    'vehicles',
+    'drivers',
+    'bank_guarantees',
+    'reminders',
+    'loans',
+    'loan_transactions',
+    'capital_entries',
+    'due_entries',
+    'cd_ledger_entries',
+    'cashbook_entries',
+    'borrowers',
+    'loan_types'
+  ];
+  // Strip finance_ prefix and _itr suffix for backward compatibility checks
+  let cleanTable = table;
+  if (table.startsWith('finance_')) {
+    cleanTable = table.substring(8);
+    if (cleanTable === 'customers') cleanTable = 'borrowers';
+    if (cleanTable === 'transactions') cleanTable = 'loan_transactions';
+    if (cleanTable === 'dues') cleanTable = 'due_entries';
+  } else if (table.endsWith('_itr')) {
+    cleanTable = table.substring(0, table.length - 4);
+  }
+  return scopedTables.includes(cleanTable);
+};
+
+const createBuilderProxy = (builder: any, table: string): any => {
+  return new Proxy(builder, {
+    get(target, prop, _receiver) {
+      // Intercept .then for offline write resolution
+      if (prop === 'then') {
+        const offlineInfo = target._offlineInfo;
+        if (offlineInfo && offlineInfo.operation_type && !supabaseDB.isOnline) {
+          return function (resolve: any, _reject: any) {
+            supabaseDB.handleOfflineWrite(offlineInfo)
+              .then(data => resolve({ data, error: null }))
+              .catch(err => resolve({ data: null, error: err }));
+          };
+        }
+      }
+
+      const origMethod = target[prop];
+      if (typeof origMethod !== 'function') {
+        return origMethod;
+      }
+
+      return function (...args: any[]) {
+        const methodName = String(prop);
+
+        if (isScopedTable(table) && supabaseDB.currentBookId && !supabaseDB.isScopeBypassed()) {
+          if (methodName === 'select') {
+            const nextBuilder = origMethod.apply(target, args);
+            const proxied = createBuilderProxy(nextBuilder.eq('book_id', supabaseDB.currentBookId), table);
+            if (target._offlineInfo) {
+              proxied._offlineInfo = { ...target._offlineInfo };
+            }
+            return proxied;
+          }
+          
+          if (methodName === 'insert') {
+            if (supabaseDB.isBookLocked) {
+              throw new Error('This Book is Locked (Read Only). Writing is blocked.');
+            }
+            const records = args[0];
+            if (Array.isArray(records)) {
+              args[0] = records.map(r => ({ ...r, book_id: supabaseDB.currentBookId }));
+            } else if (records && typeof records === 'object') {
+              args[0] = { ...records, book_id: supabaseDB.currentBookId };
+            }
+            const nextBuilder = origMethod.apply(target, args);
+            const proxied = createBuilderProxy(nextBuilder, table);
+            proxied._offlineInfo = {
+              table,
+              operation_type: 'INSERT',
+              payload: args[0],
+              filters: []
+            };
+            return proxied;
+          }
+
+          if (methodName === 'update') {
+            if (supabaseDB.isBookLocked) {
+              throw new Error('This Book is Locked (Read Only). Editing is blocked.');
+            }
+            const nextBuilder = origMethod.apply(target, args);
+            const proxied = createBuilderProxy(nextBuilder.eq('book_id', supabaseDB.currentBookId), table);
+            proxied._offlineInfo = {
+              table,
+              operation_type: 'UPDATE',
+              payload: args[0],
+              filters: []
+            };
+            return proxied;
+          }
+
+          if (methodName === 'delete') {
+            if (supabaseDB.isBookLocked) {
+              throw new Error('This Book is Locked (Read Only). Deletion is blocked.');
+            }
+            const nextBuilder = origMethod.apply(target, args);
+            const proxied = createBuilderProxy(nextBuilder.eq('book_id', supabaseDB.currentBookId), table);
+            proxied._offlineInfo = {
+              table,
+              operation_type: 'DELETE',
+              payload: null,
+              filters: []
+            };
+            return proxied;
+          }
+
+          if (methodName === 'upsert') {
+            if (supabaseDB.isBookLocked) {
+              throw new Error('This Book is Locked (Read Only). Writing is blocked.');
+            }
+            const records = args[0];
+            if (Array.isArray(records)) {
+              args[0] = records.map(r => ({ ...r, book_id: supabaseDB.currentBookId }));
+            } else if (records && typeof records === 'object') {
+              args[0] = { ...records, book_id: supabaseDB.currentBookId };
+            }
+            const nextBuilder = origMethod.apply(target, args);
+            const proxied = createBuilderProxy(nextBuilder, table);
+            proxied._offlineInfo = {
+              table,
+              operation_type: 'UPSERT',
+              payload: args[0],
+              filters: []
+            };
+            return proxied;
+          }
+        }
+
+        const result = origMethod.apply(target, args);
+
+        // Track filter parameters and offline info for builders (scoped or unscoped)
+        const isBuilder = result && typeof result === 'object' && (typeof result.select === 'function' || typeof result.from === 'function');
+        
+        if (isBuilder) {
+          result._offlineInfo = target._offlineInfo || {
+            table,
+            operation_type: null,
+            payload: null,
+            filters: []
+          };
+
+          if (['insert', 'update', 'delete', 'upsert'].includes(methodName)) {
+            result._offlineInfo.operation_type = methodName.toUpperCase();
+            if (args[0]) {
+              result._offlineInfo.payload = args[0];
+            }
+          } else if (['eq', 'in', 'neq', 'gt', 'lt'].includes(methodName) && result._offlineInfo) {
+            result._offlineInfo.filters.push({
+              type: methodName,
+              field: args[0],
+              value: args[1]
+            });
+          }
+
+          return createBuilderProxy(result, table);
+        }
+
+        if (result && typeof result === 'object' && typeof result.then === 'function') {
+          return result;
+        }
+        return typeof result?.select === 'function' || typeof result?.from === 'function'
+          ? createBuilderProxy(result, table)
+          : result;
+      };
+    }
+  });
+};
+
+export const supabase = new Proxy(rawSupabase, {
+  get(target, prop, receiver) {
+    if (prop === 'from') {
+      return (table: string) => {
+        const builder = rawSupabase.from(table);
+        return createBuilderProxy(builder, table);
+      };
+    }
+    return Reflect.get(target, prop, receiver);
+  }
+}) as typeof rawSupabase;
+
 // Supabase Database Service
 class SupabaseDatabase {
+  currentBookId: string = '';
+  isBookLocked: boolean = false;
+  private bypassBookScope: boolean = false;
+
+  // New offline support fields
+  isOnline: boolean = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  isSyncing: boolean = false;
+  currentBookName: string = '';
+  currentUserId: string = '';
+
+  setBookId(id: string) {
+    this.currentBookId = id;
+    console.log(`🔌 Database client scoped to book_id: ${id}`);
+  }
+
+  setBookName(name: string) {
+    this.currentBookName = name;
+    console.log(`🔌 Database client scoped to book name: ${name}`);
+  }
+
+  setBookLocked(locked: boolean) {
+    this.isBookLocked = locked;
+    console.log(`🔌 Database client locked state: ${locked}`);
+  }
+
+  setUserId(id: string) {
+    this.currentUserId = id;
+  }
+
+  getCurrentUserFromStorage() {
+    if (typeof window === 'undefined') return null;
+    try {
+      const savedUser = sessionStorage.getItem('thirumala_user');
+      if (savedUser) {
+        return JSON.parse(savedUser);
+      }
+    } catch (err) {
+      console.error('Error reading user from session storage:', err);
+    }
+    return null;
+  }
+
+  async bypassScope<T>(fn: () => Promise<T>): Promise<T> {
+    this.bypassBookScope = true;
+    try {
+      return await fn();
+    } finally {
+      this.bypassBookScope = false;
+    }
+  }
+
+  isScopeBypassed() {
+    return this.bypassBookScope;
+  }
+
+  // Offline support helper functions
+  async handleOfflineWrite(info: any) {
+    const offline_uuid = crypto.randomUUID();
+    const mode = getTableMode();
+    const { schema } = resolveSchemaAndTable(info.table);
+    const book_id = this.currentBookId || '';
+    const book_name = this.currentBookName || 'Unknown Book';
+    
+    const storageUser = this.getCurrentUserFromStorage();
+    const user_id = this.currentUserId || storageUser?.id || 'unknown';
+
+    let payload = info.payload || {};
+    let targetId = '';
+    
+    const idFilter = info.filters.find((f: any) => f.field === 'id');
+    if (idFilter) {
+      targetId = idFilter.value;
+    }
+
+    if (info.operation_type === 'INSERT' || info.operation_type === 'UPSERT') {
+      if (Array.isArray(payload)) {
+        payload = payload.map(item => {
+          const itemId = item.id || crypto.randomUUID();
+          return {
+            ...item,
+            id: itemId,
+            book_id
+          };
+        });
+      } else {
+        payload.id = payload.id || offline_uuid;
+        payload.book_id = book_id;
+      }
+    } else if (info.operation_type === 'UPDATE') {
+      payload.id = payload.id || targetId;
+      payload.book_id = book_id;
+    } else if (info.operation_type === 'DELETE') {
+      payload = {
+        id: targetId,
+        book_id
+      };
+      if (info.table === 'cash_book') {
+        const storageUser = this.getCurrentUserFromStorage();
+        payload.deleted_by = storageUser?.username || 'offline_sync';
+      }
+    }
+
+    const op = {
+      offline_uuid,
+      mode,
+      schema: schema as 'regular' | 'itr' | 'finance' | 'public',
+      book_id,
+      book_name,
+      user_id,
+      created_at: new Date().toISOString(),
+      operation_type: info.operation_type,
+      table: info.table,
+      payload,
+      status: 'pending_sync' as const
+    };
+
+    await db.queued_operations.put(op);
+    toast.success('Saved Offline');
+    window.dispatchEvent(new CustomEvent('offline-queue-changed'));
+
+    return Array.isArray(payload) ? payload : { id: payload.id || targetId || offline_uuid, ...payload };
+  }
+
+  async mergeOfflineOperations<T extends { id: string; pending_sync?: boolean }>(
+    table: string,
+    onlineRecords: T[]
+  ): Promise<T[]> {
+    try {
+      const pendingOps = await db.queued_operations
+        .where('status')
+        .equals('pending_sync')
+        .and(op => op.table === table && op.book_id === this.currentBookId)
+        .toArray();
+
+      if (pendingOps.length === 0) {
+        return onlineRecords;
+      }
+
+      let list = [...onlineRecords];
+
+      // Sort pending operations by creation date to process sequentially
+      const sortedOps = pendingOps.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+      for (const op of sortedOps) {
+        if (op.operation_type === 'INSERT' || op.operation_type === 'UPSERT') {
+          const payload = op.payload;
+          if (Array.isArray(payload)) {
+            payload.forEach(item => {
+              const idx = list.findIndex(r => r.id === item.id);
+              const mergedItem = { ...item, pending_sync: true } as unknown as T;
+              if (idx !== -1) {
+                list[idx] = mergedItem;
+              } else {
+                list.unshift(mergedItem);
+              }
+            });
+          } else {
+            const idx = list.findIndex(r => r.id === payload.id);
+            const mergedItem = { ...payload, pending_sync: true } as unknown as T;
+            if (idx !== -1) {
+              list[idx] = mergedItem;
+            } else {
+              list.unshift(mergedItem);
+            }
+          }
+        } else if (op.operation_type === 'UPDATE') {
+          const payload = op.payload;
+          list = list.map(item => {
+            if (item.id === payload.id) {
+              return {
+                ...item,
+                ...payload,
+                pending_sync: true
+              } as T;
+            }
+            return item;
+          });
+        } else if (op.operation_type === 'DELETE') {
+          const payload = op.payload;
+          list = list.filter(item => item.id !== payload.id);
+        }
+      }
+
+      return list;
+    } catch (err) {
+      console.error(`Error merging offline operations for table ${table}:`, err);
+      return onlineRecords;
+    }
+  }
+
+  async syncOfflineQueue(): Promise<void> {
+    console.log('🔄 Offline queue synchronization starting...');
+    const storageUser = this.getCurrentUserFromStorage();
+    const isAuthenticated = !!(this.currentUserId || storageUser);
+    if (!isAuthenticated) {
+      console.warn('⚠️ Sync deferred: user is not authenticated.');
+      return;
+    }
+    
+    const pendingOps = await db.queued_operations
+      .where('status')
+      .anyOf(['pending_sync', 'failed'])
+      .sortBy('created_at');
+
+    if (pendingOps.length === 0) {
+      console.log('✅ Offline queue is empty or already synced.');
+      return;
+    }
+
+    console.log(`📦 Found ${pendingOps.length} unsynced operations. Processing...`);
+
+    for (const op of pendingOps) {
+      await db.queued_operations.update(op.offline_uuid, { status: 'syncing' });
+      window.dispatchEvent(new CustomEvent('offline-queue-changed'));
+
+      try {
+        await this.syncOperation(op);
+        await db.queued_operations.update(op.offline_uuid, {
+          status: 'synced',
+          synced_at: new Date().toISOString(),
+          error_message: undefined
+        });
+        console.log(`✅ Synced operation ${op.offline_uuid} (${op.operation_type} on ${op.table})`);
+      } catch (err: any) {
+        console.error(`❌ Sync failed for operation ${op.offline_uuid}:`, err);
+        const errMsg = err.message || String(err);
+        const isDbRejection = err.code && typeof err.code === 'string' && err.code.length === 5;
+        
+        await db.queued_operations.update(op.offline_uuid, {
+          status: isDbRejection ? 'conflict' : 'failed',
+          error_message: errMsg
+        });
+      }
+      window.dispatchEvent(new CustomEvent('offline-queue-changed'));
+    }
+
+    try {
+      window.dispatchEvent(new CustomEvent('offline-sync-complete'));
+    } catch (e) {
+      console.error('Error dispatching offline-sync-complete:', e);
+    }
+  }
+
+  async syncOperation(item: QueuedOperation): Promise<void> {
+    const originalBookId = this.currentBookId;
+    const originalLocked = this.isBookLocked;
+    const originalMode = localStorage.getItem('table_mode');
+
+    // Healing logic: if the operation has no book ID, fallback to the current active book ID
+    const resolvedBookId = item.book_id || originalBookId;
+    this.currentBookId = resolvedBookId;
+    this.isBookLocked = false;
+    localStorage.setItem('table_mode', item.mode);
+
+    try {
+      const resolvedSchema = item.schema || (item.mode === 'itr' ? 'itr' : item.mode === 'finance' ? 'finance' : 'regular');
+      const { table: resolvedTable } = resolveSchemaAndTable(item.table);
+      const client = rawSupabase.schema(resolvedSchema);
+      
+      if (item.operation_type === 'INSERT') {
+        const payload = { ...item.payload };
+        if (!payload.book_id && resolvedBookId) {
+          payload.book_id = resolvedBookId;
+        }
+        const { error } = await client.from(resolvedTable).insert(payload);
+        if (error) throw error;
+      } else if (item.operation_type === 'UPDATE') {
+        const payload = { ...item.payload };
+        if (!payload.book_id && resolvedBookId) {
+          payload.book_id = resolvedBookId;
+        }
+        const recordId = payload.id || payload.offline_uuid;
+        const { error } = await client.from(resolvedTable).update(payload).eq('id', recordId);
+        if (error) throw error;
+      } else if (item.operation_type === 'DELETE') {
+        if (resolvedTable === 'cash_book') {
+          const recordId = item.payload.id || item.payload.offline_uuid;
+          const deletedBy = item.payload.deleted_by || 'offline_sync';
+          const success = await this.deleteCashBookEntry(recordId, deletedBy);
+          if (!success) {
+            throw new Error('Failed to delete cash book entry during sync');
+          }
+        } else {
+          const recordId = item.payload.id || item.payload.offline_uuid;
+          const { error } = await client.from(resolvedTable).delete().eq('id', recordId);
+          if (error) throw error;
+        }
+      } else if (item.operation_type === 'UPSERT') {
+        const { error } = await client.from(resolvedTable).upsert(item.payload);
+        if (error) throw error;
+      }
+    } finally {
+      this.currentBookId = originalBookId;
+      this.isBookLocked = originalLocked;
+      if (originalMode) {
+        localStorage.setItem('table_mode', originalMode);
+      } else {
+        localStorage.removeItem('table_mode');
+      }
+    }
+  }
+
+
+  async verifyBookIsEmpty(bookId: string): Promise<{ isEmpty: boolean; details?: string }> {
+    return this.bypassScope(async () => {
+      // Find the book's mode by checking both schemas
+      let bookMode: 'regular' | 'itr' | null = null;
+      const { data: regBook } = await rawSupabase.schema('regular').from('books').select('id, mode').eq('id', bookId).maybeSingle();
+      if (regBook) {
+        bookMode = 'regular';
+      } else {
+        const { data: itrBook } = await rawSupabase.schema('itr').from('books').select('id, mode').eq('id', bookId).maybeSingle();
+        if (itrBook) {
+          bookMode = 'itr';
+        }
+      }
+
+      if (!bookMode) {
+        return { isEmpty: true }; // Book not found, treat as empty
+      }
+
+      const tables = [
+        'companies',
+        'company_main_accounts',
+        'company_main_sub_acc',
+        'cash_book',
+        'vehicles',
+        'drivers',
+        'bank_guarantees',
+        'reminders'
+      ];
+
+      for (const table of tables) {
+        const { count, error } = await rawSupabase.schema(bookMode)
+          .from(table)
+          .select('*', { count: 'exact', head: true })
+          .eq('book_id', bookId);
+
+        if (!error && count && count > 0) {
+          return { isEmpty: false, details: `${count} records in ${bookMode}.${table}` };
+        }
+      }
+
+      return { isEmpty: true };
+    });
+  }
+
+  async getBookMetrics(bookId: string): Promise<{
+    companies: number;
+    accounts: number;
+    transactions: number;
+    vehicles: number;
+    reminders: number;
+  }> {
+    return this.bypassScope(async () => {
+      // Find the book's mode
+      let bookMode: 'regular' | 'itr' = 'regular';
+      const { data: regBook } = await rawSupabase.schema('regular').from('books').select('id, mode').eq('id', bookId).maybeSingle();
+      if (!regBook) {
+        const { data: itrBook } = await rawSupabase.schema('itr').from('books').select('id, mode').eq('id', bookId).maybeSingle();
+        if (itrBook) {
+          bookMode = 'itr';
+        }
+      }
+
+      const schema = bookMode;
+      const { count: companies } = await rawSupabase.schema(schema).from('companies').select('*', { count: 'exact', head: true }).eq('book_id', bookId);
+      const { count: accounts } = await rawSupabase.schema(schema).from('company_main_accounts').select('*', { count: 'exact', head: true }).eq('book_id', bookId);
+      const { count: transactions } = await rawSupabase.schema(schema).from('cash_book').select('*', { count: 'exact', head: true }).eq('book_id', bookId);
+      const { count: vehicles } = await rawSupabase.schema(schema).from('vehicles').select('*', { count: 'exact', head: true }).eq('book_id', bookId);
+      const { count: reminders } = await rawSupabase.schema(schema).from('reminders').select('*', { count: 'exact', head: true }).eq('book_id', bookId);
+
+      return {
+        companies: companies || 0,
+        accounts: accounts || 0,
+        transactions: transactions || 0,
+        vehicles: vehicles || 0,
+        reminders: reminders || 0
+      };
+    });
+  }
+
   // Utility function to check and add payment_mode column if missing
   // Note: This requires service_role permissions, so it may not work with anon key
   async ensurePaymentModeColumnExists(): Promise<boolean> {
@@ -154,10 +764,44 @@ class SupabaseDatabase {
   // Company operations
   async getCompanies(): Promise<Company[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'companies_itr' : 'companies';
+        console.log(`📦 [offlineMasterData] Fetching companies from IndexedDB cache for mode: ${mode}`);
+        const cached = await getCachedMasterData(tableName, mode);
+
+        const pendingInserts = await db.queued_operations
+          .where('status')
+          .equals('pending_sync')
+          .and(op => (op.table === 'companies' || op.table === 'companies_itr') && op.operation_type === 'INSERT')
+          .toArray();
+
+        const pendingCompanies = pendingInserts.map((op: any) => {
+          const payload = op.payload;
+          return {
+            id: payload.id || op.offline_uuid,
+            company_name: payload.company_name,
+            address: payload.address || null,
+            created_at: op.created_at,
+            updated_at: op.created_at
+          } as unknown as Company;
+        });
+
+        const seen = new Set<string>();
+        const combined = [...pendingCompanies, ...cached].filter((c: any) => {
+          const name = c.company_name?.trim();
+          if (!name || seen.has(name)) return false;
+          seen.add(name);
+          return true;
+        });
+        return combined;
+      }
+
       // Use getTableName to switch between companies and companies_itr based on mode
       const tableName = getTableName('companies');
       console.log('🔄 Fetching all companies from', tableName, 'table...');
-      console.log('📊 Current mode:', getTableMode(), '→ Using table:', tableName);
+      console.log('📊 Current mode:', tableMode, '→ Using table:', tableName);
       
       // Load all companies with explicit high limit
       const { data, error } = await supabase
@@ -173,7 +817,7 @@ class SupabaseDatabase {
 
       // Filter out duplicates and empty company names
       const seen = new Set<string>();
-      const uniqueCompanies = (data || []).filter(company => {
+      const uniqueCompanies = (data || []).filter((company: any) => {
         const name = company.company_name?.trim();
         if (!name) return false; // Filter out empty names
         if (seen.has(name)) return false; // Filter out duplicates
@@ -209,7 +853,7 @@ class SupabaseDatabase {
       }
 
       // Get unique company names (in case there are duplicates)
-      const uniqueCompanies = [...new Set(data?.map(c => c.company_name?.trim()).filter(Boolean))];
+      const uniqueCompanies = [...new Set((data || []).map((c: any) => c.company_name?.trim()).filter(Boolean))];
       console.log('📊 Distinct companies count:', uniqueCompanies.length);
       
       return uniqueCompanies.length;
@@ -243,7 +887,7 @@ class SupabaseDatabase {
       }
 
       // Get unique company names
-      const uniqueCompanyNames = [...new Set(cashBookData.map(entry => entry.company_name).filter(Boolean))];
+      const uniqueCompanyNames = [...new Set((cashBookData || []).map((entry: any) => entry.company_name).filter(Boolean))];
       console.log('📊 Found companies with data:', uniqueCompanyNames.length, uniqueCompanyNames);
 
       if (uniqueCompanyNames.length === 0) {
@@ -307,7 +951,7 @@ class SupabaseDatabase {
         return { success: false, deleted: [], error: deleteError.message };
       }
 
-      const deletedNames = deletedCompanies?.map(c => c.company_name) || [];
+      const deletedNames = (deletedCompanies || []).map((c: Company) => c.company_name);
       console.log('✅ Successfully deleted companies:', deletedNames.length);
       console.log('📋 Deleted company names:', deletedNames);
 
@@ -414,6 +1058,12 @@ class SupabaseDatabase {
 
   // Account operations
   async getAccounts(): Promise<Account[]> {
+    if (!this.isOnline) {
+      const tableMode = getTableMode();
+      const mode = tableMode === 'itr' ? 'itr' : 'regular';
+      const tableName = mode === 'itr' ? 'company_main_accounts_itr' : 'company_main_accounts';
+      return await getCachedMasterData(tableName, mode);
+    }
     const { data, error } = await supabase
       .from(getTableName('company_main_accounts'))
       .select('*')
@@ -428,6 +1078,13 @@ class SupabaseDatabase {
   }
 
   async getAccountsByCompany(companyName: string): Promise<Account[]> {
+    if (!this.isOnline) {
+      const tableMode = getTableMode();
+      const mode = tableMode === 'itr' ? 'itr' : 'regular';
+      const tableName = mode === 'itr' ? 'company_main_accounts_itr' : 'company_main_accounts';
+      const cached = await getCachedMasterData(tableName, mode);
+      return cached.filter((acc: any) => acc.company_name === companyName);
+    }
     const { data, error } = await supabase
       .from(getTableName('company_main_accounts'))
       .select('*')
@@ -526,6 +1183,12 @@ class SupabaseDatabase {
 
   // Sub Account operations
   async getSubAccounts(): Promise<SubAccount[]> {
+    if (!this.isOnline) {
+      const tableMode = getTableMode();
+      const mode = tableMode === 'itr' ? 'itr' : 'regular';
+      const tableName = mode === 'itr' ? 'company_main_sub_acc_itr' : 'company_main_sub_acc';
+      return await getCachedMasterData(tableName, mode);
+    }
     const { data, error } = await supabase
       .from(getTableName('company_main_sub_acc'))
       .select('*')
@@ -564,9 +1227,9 @@ class SupabaseDatabase {
       // Normalize and get unique sub account names
       // Trim whitespace, convert to lowercase for case-insensitive comparison
       const normalizedSubAccounts = data
-        .map(item => item.sub_acc?.trim())
+        .map((item: any) => item.sub_acc?.trim())
         .filter(Boolean) // Remove null, undefined, and empty strings
-        .map(acc => acc.toLowerCase()); // Normalize to lowercase for case-insensitive comparison
+        .map((acc: any) => acc.toLowerCase()); // Normalize to lowercase for case-insensitive comparison
 
       // Get unique sub account names using Set
       const uniqueSubAccounts = [...new Set(normalizedSubAccounts)];
@@ -600,7 +1263,7 @@ class SupabaseDatabase {
       }
 
       // Get unique account names
-      const uniqueAccounts = [...new Set(data?.map(item => item.acc_name).filter(Boolean))];
+      const uniqueAccounts = [...new Set((data || []).map((item: any) => item.acc_name).filter(Boolean))];
       console.log('📊 Distinct main accounts count from company_main_accounts:', uniqueAccounts.length);
       
       return uniqueAccounts.length;
@@ -744,7 +1407,7 @@ class SupabaseDatabase {
       }
       
       // Clean fields and normalize approved flag to strict boolean
-      const cleanedData = (data || []).map((entry, idx) => {
+      const cleanedData = (data || []).map((entry: any, idx: number) => {
         // CRITICAL: Extract payment_mode from database - handle all edge cases
         let paymentMode = '';
         
@@ -787,15 +1450,15 @@ class SupabaseDatabase {
           sub_acc_name: entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
           particulars: entry.particulars?.replace(/\[DELETED\]\s*/g, '').trim() || '',
           company_name: entry.company_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
-          approved: entry.approved === true || entry.approved === 'true',
+          approved: entry.approved === true || (typeof entry.approved === 'string' && ['true', 'approved'].includes(entry.approved.toLowerCase().trim())),
           payment_mode: paymentMode // Always include payment_mode (even if empty string)
         };
       });
       
-      return cleanedData;
+      return this.mergeOfflineOperations('cash_book', cleanedData);
     } catch (error) {
       console.error('Error in getCashBookEntries:', error);
-      return [];
+      return this.mergeOfflineOperations('cash_book', []);
     }
   }
 
@@ -843,7 +1506,7 @@ class SupabaseDatabase {
       console.log(`✅ Fetched ${resultCount} entries for today`);
       
       // Clean fields and normalize approved flag to strict boolean
-      const cleanedData = (data || []).map(entry => {
+      const cleanedData = (data || []).map((entry: any) => {
         // Preserve payment_mode if it exists, otherwise fallback to credit_mode/debit_mode
         let paymentMode = '';
         
@@ -872,7 +1535,7 @@ class SupabaseDatabase {
           sub_acc_name: entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
           particulars: entry.particulars?.replace(/\[DELETED\]\s*/g, '').trim() || '',
           company_name: entry.company_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
-          approved: entry.approved === true || entry.approved === 'true',
+          approved: entry.approved === true || (typeof entry.approved === 'string' && ['true', 'approved'].includes(entry.approved.toLowerCase().trim())),
           payment_mode: paymentMode
         };
       });
@@ -1006,7 +1669,7 @@ class SupabaseDatabase {
       }
 
       console.log(`📊 Filtered entries loaded: ${data?.length || 0} (Total available: ${count || 0})`);
-      console.log('📊 Sample of returned entries:', data?.slice(0, 2).map(e => ({ 
+      console.log('📊 Sample of returned entries:', data?.slice(0, 2).map((e: any) => ({ 
         id: e.id, 
         company: e.company_name, 
         date: e.c_date 
@@ -1062,7 +1725,7 @@ class SupabaseDatabase {
       }
 
       console.log(`📊 Filtered entries loaded: ${data?.length || 0} (Total available: ${count || 0})`);
-      console.log('📊 Sample of returned entries:', data?.slice(0, 2).map(e => ({ 
+      console.log('📊 Sample of returned entries:', data?.slice(0, 2).map((e: any) => ({ 
         id: e.id, 
         company: e.company_name, 
         date: e.c_date 
@@ -1399,11 +2062,11 @@ class SupabaseDatabase {
 
     if (error) {
       console.error('Error fetching entries by date:', error);
-      return [];
+      return this.mergeOfflineOperations('cash_book', []);
     }
     
     // Clean fields and normalize approved to strict boolean
-    const cleanedData = (data || []).map((entry, idx) => {
+    const cleanedData = (data || []).map((entry: any, idx: number) => {
       // CRITICAL: Extract payment_mode from database - handle all edge cases
       let paymentMode = '';
       
@@ -1450,12 +2113,12 @@ class SupabaseDatabase {
         sub_acc_name: entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
         particulars: entry.particulars?.replace(/\[DELETED\]\s*/g, '').trim() || '',
         company_name: entry.company_name?.replace(/\[DELETED\]\s*/g, '').trim() || '',
-        approved: entry.approved === true || entry.approved === 'true',
+        approved: entry.approved === true || (typeof entry.approved === 'string' && ['true', 'approved'].includes(entry.approved.toLowerCase().trim())),
         payment_mode: paymentMode // This is the processed payment_mode that should be displayed
       };
     });
     
-    return cleanedData as CashBookEntry[];
+    return this.mergeOfflineOperations('cash_book', cleanedData as CashBookEntry[]);
   }
 
   // Bulk insert/update operations for dual entry create (used by hooks)
@@ -1661,8 +2324,8 @@ class SupabaseDatabase {
 
       // Create audit logs for each updated entry
       if (oldEntries && updatedEntries && editedBy) {
-        const auditLogs = oldEntries.map((oldEntry) => {
-          const updatedEntry = updatedEntries.find(e => e.id === oldEntry.id);
+        const auditLogs = oldEntries.map((oldEntry: any) => {
+          const updatedEntry = updatedEntries.find((e: any) => e.id === oldEntry.id);
           if (!updatedEntry) return null;
           
           return {
@@ -1994,74 +2657,6 @@ class SupabaseDatabase {
     }
   }
 
-  // Create deleted_cash_book table if it doesn't exist
-  private async createDeletedCashBookTable(): Promise<void> {
-    try {
-      console.log('🔧 Creating deleted_cash_book table...');
-      
-      // First, try to insert a test record to see if table exists
-      const testRecord = {
-        id: 'test-table-check-' + Date.now(),
-        sno: 0,
-        acc_name: 'test',
-        c_date: new Date().toISOString().split('T')[0],
-        credit: 0,
-        debit: 0,
-        company_name: 'test',
-        deleted_by: 'system',
-        deleted_at: new Date().toISOString()
-      };
-
-      const { error: testError } = await supabase
-        .from(getTableName('deleted_cash_book'))
-        .insert(testRecord);
-
-      if (!testError) {
-        console.log('✅ deleted_cash_book table already exists and is accessible');
-        // Clean up test record
-        await supabase
-          .from(getTableName('deleted_cash_book'))
-          .delete()
-          .eq('id', testRecord.id);
-        return;
-      }
-
-      console.log('📋 Table does not exist, attempting to create...');
-      console.log('⚠️ Note: Table creation requires database admin privileges');
-      console.log('📋 Please create the deleted_cash_book table manually with the following structure:');
-      console.log(`
-        CREATE TABLE deleted_cash_book (
-          id TEXT PRIMARY KEY,
-          sno INTEGER,
-          acc_name TEXT NOT NULL,
-          sub_acc_name TEXT,
-          particulars TEXT,
-          c_date DATE NOT NULL,
-          credit DECIMAL(15,2) DEFAULT 0,
-          debit DECIMAL(15,2) DEFAULT 0,
-          lock_record BOOLEAN DEFAULT FALSE,
-          company_name TEXT NOT NULL,
-          address TEXT,
-          staff TEXT,
-          users TEXT,
-          entry_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          sale_qty INTEGER DEFAULT 0,
-          purchase_qty INTEGER DEFAULT 0,
-          approved BOOLEAN DEFAULT FALSE,
-          edited BOOLEAN DEFAULT FALSE,
-          e_count INTEGER DEFAULT 0,
-          cb TEXT,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          deleted_by TEXT NOT NULL,
-          deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );
-      `);
-      
-    } catch (error) {
-      console.error('Exception in createDeletedCashBookTable:', error);
-    }
-  }
 
   // Simple delete test function for debugging
   async testDeleteEntry(entryId: string, deletedBy: string): Promise<{ success: boolean; error?: string }> {
@@ -2256,6 +2851,32 @@ class SupabaseDatabase {
   // Distinct staff names from cash_book for free-text staff selection
   async getDistinctStaffNames(): Promise<{ value: string; label: string }[]> {
     try {
+      if (!this.isOnline) {
+        const tableMode = getTableMode();
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'staff_itr' : 'staff';
+        console.log(`📦 [offlineMasterData] Fetching distinct staff names from IndexedDB cache`);
+        const cached = await getCachedMasterData(tableName, mode);
+
+        const pendingOps = await db.queued_operations
+          .where('status')
+          .equals('pending_sync')
+          .and(op => op.table === 'cash_book' && op.book_id === this.currentBookId)
+          .toArray();
+
+        const pendingStaff = pendingOps
+          .map((op: any) => op.payload.staff?.trim())
+          .filter(Boolean);
+
+        const cachedStaffNames = cached.map((item: any) => item.value);
+        const combined = [...pendingStaff, ...cachedStaffNames];
+        const unique = Array.from(new Set(combined))
+          .filter(Boolean)
+          .map(name => ({ value: name, label: name }));
+
+        return unique;
+      }
+
       const { data, error } = await supabase
         .from(getTableName('cash_book'))
         .select('staff')
@@ -2268,7 +2889,7 @@ class SupabaseDatabase {
       }
       const unique = Array.from(new Set((data || []).map((r: any) => (r.staff || '').trim())))
         .filter(Boolean)
-        .map(name => ({ value: name, label: name }));
+        .map(name => ({ value: name as string, label: name as string }));
       return unique;
     } catch (err) {
       console.error('Error in getDistinctStaffNames:', err);
@@ -2291,7 +2912,7 @@ class SupabaseDatabase {
       }
       const unique = Array.from(new Set((data || []).map((r: any) => (r.users || '').trim())))
         .filter(Boolean)
-        .map(name => ({ value: name, label: name }));
+        .map(name => ({ value: name as string, label: name as string }));
       return unique;
     } catch (err) {
       console.error('Error in getDistinctUserNames:', err);
@@ -2540,7 +3161,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      return (data || []).map(cred => ({
+      return (data || []).map((cred: any) => ({
         username: cred.username,
         password: cred.password,
         is_admin: cred.is_admin,
@@ -2640,10 +3261,10 @@ class SupabaseDatabase {
 
     if (error) {
       console.error('Error fetching vehicles:', error);
-      return [];
+      return this.mergeOfflineOperations('vehicles', []);
     }
 
-    return data || [];
+    return this.mergeOfflineOperations('vehicles', data || []);
   }
 
   async addVehicle(
@@ -2861,7 +3482,7 @@ class SupabaseDatabase {
       if (sumData && sumData.length > 0) {
         console.log(`📊 Processing ${sumData.length} records for calculations...`);
         
-        totalCredit = sumData.reduce((sum, entry) => {
+        totalCredit = sumData.reduce((sum: number, entry: any) => {
           const credit = parseFloat(entry.credit) || 0;
           if (isNaN(credit)) {
             console.warn('⚠️ Invalid credit value found:', entry.credit);
@@ -2870,7 +3491,7 @@ class SupabaseDatabase {
           return sum + credit;
         }, 0);
         
-        totalDebit = sumData.reduce((sum, entry) => {
+        totalDebit = sumData.reduce((sum: number, entry: any) => {
           const debit = parseFloat(entry.debit) || 0;
           if (isNaN(debit)) {
             console.warn('⚠️ Invalid debit value found:', entry.debit);
@@ -2986,11 +3607,11 @@ class SupabaseDatabase {
         .limit(1000);
       
       if (!allError && allData) {
-        const nonNumericCredits = allData.filter(entry => 
+        const nonNumericCredits = allData.filter((entry: any) => 
           entry.credit !== null && isNaN(parseFloat(entry.credit))
         ).length;
         
-        const nonNumericDebits = allData.filter(entry => 
+        const nonNumericDebits = allData.filter((entry: any) => 
           entry.debit !== null && isNaN(parseFloat(entry.debit))
         ).length;
         
@@ -3240,10 +3861,10 @@ class SupabaseDatabase {
     const entries = data || [];
     
     const totalCredit = entries.reduce(
-      (sum, e) => sum + (e.credit || 0),
+      (sum: number, e: any) => sum + (e.credit || 0),
       0
     );
-    const totalDebit = entries.reduce((sum, e) => sum + (e.debit || 0), 0);
+    const totalDebit = entries.reduce((sum: number, e: any) => sum + (e.debit || 0), 0);
     const balance = totalCredit - totalDebit;
     const totalTransactions = entries.length;
 
@@ -3485,11 +4106,11 @@ class SupabaseDatabase {
         console.log('📋 Sample cash book record:', cashBookData[0]);
         
         // Check if any records have been edited
-        const editedRecords = cashBookData.filter(record => record.edited === true);
+        const editedRecords = cashBookData.filter((record: any) => record.edited === true);
         console.log('📋 Edited records found:', editedRecords.length);
         
         // Check if any records have different updated_at and created_at
-        const updatedRecords = cashBookData.filter(record => 
+        const updatedRecords = cashBookData.filter((record: any) => 
           record.updated_at && record.created_at && 
           record.updated_at !== record.created_at
         );
@@ -3529,7 +4150,7 @@ class SupabaseDatabase {
         console.log('✅ Successfully fetched edited records from cash_book:', editedData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = editedData.map(record => ({
+        const auditLogData = editedData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3589,7 +4210,7 @@ class SupabaseDatabase {
         console.log('✅ Successfully fetched edited records (no ordering):', noOrderData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = noOrderData.map(record => ({
+        const auditLogData = noOrderData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3642,7 +4263,7 @@ class SupabaseDatabase {
         console.log('✅ Successfully fetched updated records from cash_book:', updatedData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = updatedData.map(record => ({
+        const auditLogData = updatedData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3702,7 +4323,7 @@ class SupabaseDatabase {
         console.log('✅ Successfully fetched updated records (no ordering):', noOrderUpdatedData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = noOrderUpdatedData.map(record => ({
+        const auditLogData = noOrderUpdatedData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3756,7 +4377,7 @@ class SupabaseDatabase {
         console.log('✅ Successfully fetched recent records from cash_book:', anyData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = anyData.map(record => ({
+        const auditLogData = anyData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3811,7 +4432,7 @@ class SupabaseDatabase {
         console.log('✅ Found records in cash_book, showing as edit history:', fallbackData.length);
         
         // Transform the data to match audit log format
-        const auditLogData = fallbackData.map(record => ({
+        const auditLogData = fallbackData.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3863,7 +4484,7 @@ class SupabaseDatabase {
         console.log('✅ Found recent cash_book entries:', recentData.length);
         
         // Transform recent records to show as "recent entries" (not edits)
-        const recentEntries = recentData.map(record => ({
+        const recentEntries = recentData.map((record: any) => ({
           id: `recent-${record.id}`,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -3922,7 +4543,7 @@ class SupabaseDatabase {
         if (!recentError && recentData && recentData.length > 0) {
           console.log('✅ Exception fallback: Found recent entries:', recentData.length);
           
-          const recentEntries = recentData.map(record => ({
+          const recentEntries = recentData.map((record: any) => ({
             id: `recent-exception-${record.id}`,
             cash_book_id: record.id,
             old_values: JSON.stringify({
@@ -3979,7 +4600,7 @@ class SupabaseDatabase {
       
       if (!editCashBookError && editCashBookData && editCashBookData.length > 0) {
         const dates = new Set<string>();
-        editCashBookData.forEach(record => {
+        editCashBookData.forEach((record: any) => {
           if (record.edited_at) {
             const dateStr = String(record.edited_at).slice(0, 10); // Extract YYYY-MM-DD
             if (dateStr) dates.add(dateStr);
@@ -3998,7 +4619,7 @@ class SupabaseDatabase {
       
       if (!auditLogError && auditLogData && auditLogData.length > 0) {
         const dates = new Set<string>();
-        auditLogData.forEach(record => {
+        auditLogData.forEach((record: any) => {
           if (record.edited_at) {
             const dateStr = String(record.edited_at).slice(0, 10); // Extract YYYY-MM-DD
             if (dateStr) dates.add(dateStr);
@@ -4018,7 +4639,7 @@ class SupabaseDatabase {
       
       if (!cashBookError && cashBookData && cashBookData.length > 0) {
         const dates = new Set<string>();
-        cashBookData.forEach(record => {
+        cashBookData.forEach((record: any) => {
           if (record.updated_at) {
             const dateStr = String(record.updated_at).slice(0, 10); // Extract YYYY-MM-DD
             if (dateStr) dates.add(dateStr);
@@ -4051,7 +4672,7 @@ class SupabaseDatabase {
         console.log('✅ [SIMPLE] Successfully fetched records:', data.length);
         
         // Transform to audit log format
-        return data.map(record => ({
+        return data.map((record: any) => ({
           id: record.id,
           cash_book_id: record.id,
           old_values: JSON.stringify({
@@ -4743,6 +5364,28 @@ class SupabaseDatabase {
 
   // Get unique values for dropdowns in Edit Entry page
   async getUniqueParticulars(): Promise<string[]> {
+    if (!this.isOnline) {
+      const tableMode = getTableMode();
+      const mode = tableMode === 'itr' ? 'itr' : 'regular';
+      const tableName = mode === 'itr' ? 'particulars_itr' : 'particulars';
+      console.log(`📦 [offlineMasterData] Fetching distinct particulars from IndexedDB cache`);
+      const cached = await getCachedMasterData(tableName, mode);
+
+      const pendingOps = await db.queued_operations
+        .where('status')
+        .equals('pending_sync')
+        .and(op => op.table === 'cash_book' && op.book_id === this.currentBookId)
+        .toArray();
+
+      const pendingParticulars = pendingOps
+        .map((op: any) => op.payload.particulars?.trim())
+        .filter(Boolean);
+
+      const combined = [...pendingParticulars, ...cached];
+      const unique = Array.from(new Set(combined));
+      return unique.sort();
+    }
+
     const { data, error } = await supabase
       .from(getTableName('cash_book'))
       .select('particulars')
@@ -4755,8 +5398,8 @@ class SupabaseDatabase {
     }
 
     const uniqueParticulars = [
-      ...new Set(data?.map(item => item.particulars).filter(Boolean)),
-    ];
+      ...new Set((data || []).map((item: any) => item.particulars).filter(Boolean)),
+    ] as string[];
     return uniqueParticulars.sort();
   }
 
@@ -4773,9 +5416,9 @@ class SupabaseDatabase {
     }
 
     const uniqueQuantities = [
-      ...new Set(data?.map(item => item.sale_qty).filter(Boolean)),
-    ];
-    return uniqueQuantities.sort((a, b) => a - b);
+      ...new Set((data || []).map((item: any) => item.sale_qty).filter(Boolean)),
+    ] as number[];
+    return uniqueQuantities.sort((a: any, b: any) => a - b);
   }
 
   async getUniquePurchaseQuantities(): Promise<number[]> {
@@ -4791,9 +5434,9 @@ class SupabaseDatabase {
     }
 
     const uniqueQuantities = [
-      ...new Set(data?.map(item => item.purchase_qty).filter(Boolean)),
-    ];
-    return uniqueQuantities.sort((a, b) => a - b);
+      ...new Set((data || []).map((item: any) => item.purchase_qty).filter(Boolean)),
+    ] as number[];
+    return uniqueQuantities.sort((a: any, b: any) => a - b);
   }
 
   async getUniqueCreditAmounts(): Promise<number[]> {
@@ -4809,9 +5452,9 @@ class SupabaseDatabase {
     }
 
     const uniqueAmounts = [
-      ...new Set(data?.map(item => item.credit).filter(Boolean)),
-    ];
-    return uniqueAmounts.sort((a, b) => a - b);
+      ...new Set((data || []).map((item: any) => item.credit).filter(Boolean)),
+    ] as number[];
+    return uniqueAmounts.sort((a: any, b: any) => a - b);
   }
 
   async getUniqueDebitAmounts(): Promise<number[]> {
@@ -4827,14 +5470,23 @@ class SupabaseDatabase {
     }
 
     const uniqueAmounts = [
-      ...new Set(data?.map(item => item.debit).filter(Boolean)),
-    ];
-    return uniqueAmounts.sort((a, b) => a - b);
+      ...new Set((data || []).map((item: any) => item.debit).filter(Boolean)),
+    ] as number[];
+    return uniqueAmounts.sort((a: any, b: any) => a - b);
   }
 
   // New functions for dependent dropdowns
   async getDistinctAccountNames(): Promise<string[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'company_main_accounts_itr' : 'company_main_accounts';
+        console.log(`📦 [offlineMasterData] Fetching distinct account names from IndexedDB cache for mode: ${mode}`);
+        const cached = await getCachedMasterData(tableName, mode);
+        const names = cached.map((acc: any) => acc.acc_name?.trim()).filter(Boolean);
+        return [...new Set(names)].sort();
+      }
       const { data, error } = await supabase
         .from(getTableName('cash_book'))
         .select('acc_name')
@@ -4846,7 +5498,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      const uniqueAccounts = [...new Set(data?.map(item => item.acc_name))];
+      const uniqueAccounts = [...new Set((data || []).map((item: any) => item.acc_name))] as string[];
       return uniqueAccounts.sort();
     } catch (error) {
       console.error('Error in getDistinctAccountNames:', error);
@@ -4857,6 +5509,35 @@ class SupabaseDatabase {
   // Company-based filtering functions
   async getDistinctAccountNamesByCompany(companyName: string): Promise<string[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'company_main_accounts_itr' : 'company_main_accounts';
+        console.log(`📦 [offlineMasterData] Fetching accounts for company "${companyName}" from IndexedDB cache`);
+        const cached = await getCachedMasterData(tableName, mode);
+        
+        // Filter cached accounts by company
+        const filteredCached = cached
+          .filter((acc: any) => acc.company_name === companyName)
+          .map((acc: any) => acc.acc_name);
+
+        // Merge from pending insertions in queued_operations
+        const pendingInserts = await db.queued_operations
+          .where('status')
+          .equals('pending_sync')
+          .and(op => (op.table === 'company_main_accounts' || op.table === 'company_main_accounts_itr') && op.operation_type === 'INSERT')
+          .toArray();
+
+        const pendingAccounts = pendingInserts
+          .map((op: any) => op.payload)
+          .filter((p: any) => p.company_name === companyName && p.acc_name)
+          .map((p: any) => p.acc_name);
+
+        const combined = [...pendingAccounts, ...filteredCached];
+        const unique = [...new Set(combined)];
+        return unique.sort();
+      }
+
       console.log(`🔍 [DEBUG] Fetching account names for company: "${companyName}"`);
       
       // Get accounts from cash_book table (existing entries)
@@ -4884,8 +5565,8 @@ class SupabaseDatabase {
       }
 
       // Combine both sources with additional validation
-      const cashBookAccounts = cashBookData?.map(item => item.acc_name) || [];
-      const mainAccounts = mainAccountsData?.map(item => item.acc_name) || [];
+      const cashBookAccounts = cashBookData?.map((item: any) => item.acc_name) || [];
+      const mainAccounts = mainAccountsData?.map((item: any) => item.acc_name) || [];
       
       console.log(`📊 [DEBUG] Cash book accounts for company "${companyName}":`, cashBookAccounts.length, 'accounts');
       console.log(`📊 [DEBUG] Cash book raw data:`, cashBookData?.slice(0, 5));
@@ -4908,6 +5589,18 @@ class SupabaseDatabase {
 
   async getSubAccountsByAccountName(accountName: string): Promise<string[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'company_main_sub_acc_itr' : 'company_main_sub_acc';
+        console.log(`📦 [offlineMasterData] Fetching sub-accounts for account "${accountName}" from IndexedDB cache`);
+        const cached = await getCachedMasterData(tableName, mode);
+        const filteredCached = cached
+          .filter((sub: any) => sub.acc_name === accountName)
+          .map((sub: any) => sub.sub_acc?.trim())
+          .filter(Boolean);
+        return [...new Set(filteredCached)].sort();
+      }
       const { data, error } = await supabase
         .from(getTableName('cash_book'))
         .select('sub_acc_name')
@@ -4920,7 +5613,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      const uniqueSubAccounts = [...new Set(data?.map(item => item.sub_acc_name))];
+      const uniqueSubAccounts = [...new Set((data || []).map((item: any) => item.sub_acc_name))] as string[];
       return uniqueSubAccounts.sort();
     } catch (error) {
       console.error('Error in getSubAccountsByAccountName:', error);
@@ -4930,6 +5623,36 @@ class SupabaseDatabase {
 
   async getSubAccountsByAccountAndCompany(accountName: string, companyName: string): Promise<string[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'company_main_sub_acc_itr' : 'company_main_sub_acc';
+        console.log(`📦 [offlineMasterData] Fetching sub-accounts for account "${accountName}" and company "${companyName}" from IndexedDB cache`);
+        const cached = await getCachedMasterData(tableName, mode);
+
+        // Filter cached sub-accounts
+        const filteredCached = cached
+          .filter((sub: any) => sub.acc_name === accountName && sub.company_name === companyName)
+          .map((sub: any) => sub.sub_acc);
+
+        // Merge from pending insertions in queued_operations
+        const pendingInserts = await db.queued_operations
+          .where('status')
+          .equals('pending_sync')
+          .and(op => (op.table === 'company_main_sub_acc' || op.table === 'company_main_sub_acc_itr') && op.operation_type === 'INSERT')
+          .toArray();
+
+        const pendingSubAccounts = pendingInserts
+          .map((op: any) => op.payload)
+          .filter((p: any) => p.acc_name === accountName && p.company_name === companyName && p.sub_acc)
+          .map((p: any) => p.sub_acc);
+
+        // Combine and return unique
+        const combined = [...pendingSubAccounts, ...filteredCached];
+        const unique = [...new Set(combined)];
+        return unique.sort();
+      }
+
       console.log(`🔍 [DEBUG] Fetching sub-account names for account: "${accountName}" and company: "${companyName}"`);
       
       // Get sub-accounts from cash_book table (existing entries)
@@ -4959,8 +5682,8 @@ class SupabaseDatabase {
       }
 
       // Combine both sources with additional validation
-      const cashBookSubAccounts = cashBookData?.map(item => item.sub_acc_name) || [];
-      const subAccounts = subAccountsData?.map(item => item.sub_acc) || [];
+      const cashBookSubAccounts = cashBookData?.map((item: any) => item.sub_acc_name) || [];
+      const subAccounts = subAccountsData?.map((item: any) => item.sub_acc) || [];
       
       console.log(`📊 [DEBUG] Cash book sub-accounts for account "${accountName}" and company "${companyName}":`, cashBookSubAccounts.length, 'sub-accounts');
       console.log(`📊 [DEBUG] Cash book raw data:`, cashBookData?.slice(0, 5));
@@ -4996,7 +5719,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      const uniqueParticulars = [...new Set(data?.map(item => item.particulars))];
+      const uniqueParticulars = [...new Set((data || []).map((item: any) => item.particulars))] as string[];
       return uniqueParticulars.sort();
     } catch (error) {
       console.error('Error in getParticularsBySubAccount:', error);
@@ -5007,6 +5730,15 @@ class SupabaseDatabase {
   // Get all distinct sub-account names from cash_book (all 67k records)
   async getDistinctSubAccountNames(): Promise<string[]> {
     try {
+      const tableMode = getTableMode();
+      if (!this.isOnline) {
+        const mode = tableMode === 'itr' ? 'itr' : 'regular';
+        const tableName = mode === 'itr' ? 'company_main_sub_acc_itr' : 'company_main_sub_acc';
+        console.log(`📦 [offlineMasterData] Fetching distinct sub-account names from IndexedDB cache for mode: ${mode}`);
+        const cached = await getCachedMasterData(tableName, mode);
+        const names = cached.map((sub: any) => sub.sub_acc?.trim()).filter(Boolean);
+        return [...new Set(names)].sort();
+      }
       const { data, error } = await supabase
         .from(getTableName('cash_book'))
         .select('sub_acc_name')
@@ -5019,7 +5751,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      const uniqueSubAccounts = [...new Set(data?.map(item => item.sub_acc_name))];
+      const uniqueSubAccounts = [...new Set((data || []).map((item: any) => item.sub_acc_name))] as string[];
       return uniqueSubAccounts.sort();
     } catch (error) {
       console.error('Error in getDistinctSubAccountNames:', error);
@@ -5043,7 +5775,7 @@ class SupabaseDatabase {
         return [];
       }
 
-      const uniqueSubAccounts = [...new Set(data?.map(item => item.sub_acc_name))];
+      const uniqueSubAccounts = [...new Set((data || []).map((item: any) => item.sub_acc_name))] as string[];
       return uniqueSubAccounts.sort();
     } catch (error) {
       console.error('Error in getDistinctSubAccountNamesByCompany:', error);
@@ -5061,26 +5793,26 @@ class SupabaseDatabase {
         .from(getTableName('cash_book'))
         .select('company_name')
         .not('company_name', 'is', null)
-        .not('company_name', 'eq', '');
+        .not('company_name', 'eq', '') as { data: any[] | null; error: any };
       
       if (companyError) {
         console.error('Error fetching company names:', companyError);
         return;
       }
       
-      const uniqueCompanies = [...new Set(companyData?.map(item => item.company_name))].sort();
+      const uniqueCompanies = [...new Set((companyData || []).map((item: any) => item.company_name))].sort();
       console.log('📊 [DEBUG] All unique company names in database:', uniqueCompanies);
       
       // Check for BVR and BVT specifically
-      const bvrData = companyData?.filter(item => 
+      const bvrData = (companyData || []).filter((item: any) => 
         item.company_name?.toLowerCase().includes('bvr') || 
         item.company_name?.toLowerCase().includes('bvt')
       );
-      console.log('📊 [DEBUG] BVR/BVT related company names:', bvrData?.map(item => item.company_name));
+      console.log('📊 [DEBUG] BVR/BVT related company names:', bvrData.map((item: any) => item.company_name));
       
       // Get account names for BVR and BVT companies
       for (const company of uniqueCompanies) {
-        if (company?.toLowerCase().includes('bvr') || company?.toLowerCase().includes('bvt')) {
+        if (company && typeof company === 'string' && (company.toLowerCase().includes('bvr') || company.toLowerCase().includes('bvt'))) {
           console.log(`🔍 [DEBUG] Checking accounts for company: "${company}"`);
           const accounts = await this.getDistinctAccountNamesByCompany(company);
           console.log(`📊 [DEBUG] Found ${accounts.length} accounts for "${company}":`, accounts);
@@ -5329,7 +6061,7 @@ class SupabaseDatabase {
         }
       }
       
-      console.log(`✅ Cleanup completed! Updated ${totalUpdated} entries across all tables`);
+      console.log(`Clean up completed! Updated ${totalUpdated} entries across all tables`);
       return { 
         success: true, 
         message: `Successfully cleaned up [DELETED] text from ${totalUpdated} entries`, 
@@ -5343,6 +6075,260 @@ class SupabaseDatabase {
         message: `Cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 
         updatedCount: 0 
       };
+    }
+  }
+
+  // Reminders Operations
+  async getReminders(mode: 'regular' | 'itr', userId: string, isAdmin: boolean): Promise<Reminder[]> {
+    try {
+      console.log('🔄 Fetching reminders for mode:', mode, 'User ID:', userId, 'Is Admin:', isAdmin);
+      
+      let query = supabase
+        .from('reminders')
+        .select('*')
+        .eq('mode', mode)
+        .is('deleted_at', null)
+        .order('event_date', { ascending: true });
+
+      // Non-admins can only see their own reminders or reminders assigned to "All Users" (null)
+      if (!isAdmin) {
+        query = query.or(`assigned_user_id.is.null,assigned_user_id.eq.${userId},created_by.eq.${userId}`);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        console.error('❌ Error fetching reminders:', error);
+        return this.mergeOfflineOperations('reminders', []);
+      }
+
+      // Fetch user mappings
+      const { data: usersData, error: usersError } = await supabase
+        .from('users')
+        .select('id, username');
+
+      if (usersError) {
+        console.error('❌ Error fetching users for reminders mapping:', usersError);
+      }
+
+      const userMap = new Map<string, string>();
+      if (usersData) {
+        usersData.forEach((u: any) => {
+          userMap.set(u.id, u.username);
+        });
+      }
+
+      const mapped = (data || []).map((r: any) => ({
+        ...r,
+        assigned_username: r.assigned_user_id ? userMap.get(r.assigned_user_id) || null : null,
+        creator_username: r.created_by ? userMap.get(r.created_by) || null : null
+      }));
+
+      return this.mergeOfflineOperations('reminders', mapped as Reminder[]);
+    } catch (error) {
+      console.error('❌ Error in getReminders:', error);
+      return this.mergeOfflineOperations('reminders', []);
+    }
+  }
+
+  async createReminder(reminder: Omit<Reminder, 'id' | 'created_at' | 'updated_at'>): Promise<Reminder | null> {
+    try {
+      console.log('➕ Creating reminder:', reminder);
+      const { data, error } = await supabase
+        .from('reminders')
+        .insert([reminder])
+        .select('*')
+        .single();
+
+      if (error) {
+        console.error('❌ Error creating reminder:', error);
+        return null;
+      }
+
+      if (!data) {
+        console.error('❌ No data returned on reminder creation');
+        return null;
+      }
+
+      // Fetch user mappings
+      const { data: usersData, error: usersError } = await supabase
+        .from('users')
+        .select('id, username');
+
+      if (usersError) {
+        console.error('❌ Error fetching users for reminder mapping:', usersError);
+      }
+
+      const userMap = new Map<string, string>();
+      if (usersData) {
+        usersData.forEach((u: any) => {
+          userMap.set(u.id, u.username);
+        });
+      }
+
+      const mapped = {
+        ...data,
+        assigned_username: data.assigned_user_id ? userMap.get(data.assigned_user_id) || null : null,
+        creator_username: data.created_by ? userMap.get(data.created_by) || null : null
+      };
+
+      return mapped as Reminder;
+    } catch (error) {
+      console.error('❌ Error in createReminder:', error);
+      return null;
+    }
+  }
+
+  async updateReminder(id: string, reminder: Partial<Reminder>): Promise<Reminder | null> {
+    try {
+      console.log('🔄 Updating reminder:', id, reminder);
+      const { data, error } = await supabase
+        .from('reminders')
+        .update({
+          ...reminder,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', id)
+        .select('*')
+        .single();
+
+      if (error) {
+        console.error('❌ Error updating reminder:', error);
+        return null;
+      }
+
+      if (!data) {
+        console.error('❌ No data returned on reminder update');
+        return null;
+      }
+
+      // Fetch user mappings
+      const { data: usersData, error: usersError } = await supabase
+        .from('users')
+        .select('id, username');
+
+      if (usersError) {
+        console.error('❌ Error fetching users for reminder mapping:', usersError);
+      }
+
+      const userMap = new Map<string, string>();
+      if (usersData) {
+        usersData.forEach((u: any) => {
+          userMap.set(u.id, u.username);
+        });
+      }
+
+      const mapped = {
+        ...data,
+        assigned_username: data.assigned_user_id ? userMap.get(data.assigned_user_id) || null : null,
+        creator_username: data.created_by ? userMap.get(data.created_by) || null : null
+      };
+
+      return mapped as Reminder;
+    } catch (error) {
+      console.error('❌ Error in updateReminder:', error);
+      return null;
+    }
+  }
+
+  async deleteReminder(id: string): Promise<boolean> {
+    try {
+      console.log('🗑️ Soft deleting reminder:', id);
+      const { error } = await supabase
+        .from('reminders')
+        .update({
+          deleted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+
+      if (error) {
+        console.error('❌ Error deleting reminder:', error);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('❌ Error in deleteReminder:', error);
+      return false;
+    }
+  }
+
+  async getReminderStats(mode: 'regular' | 'itr', userId: string, isAdmin: boolean): Promise<{ pending: number; today: number; upcoming: number; overdue: number; completed: number }> {
+    try {
+      const reminders = await this.getReminders(mode, userId, isAdmin);
+      
+      const stats = {
+        pending: 0,
+        today: 0,
+        upcoming: 0,
+        overdue: 0,
+        completed: 0
+      };
+
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+      const todayTime = new Date(todayStr).getTime();
+
+      reminders.forEach(r => {
+        if (r.status === 'completed') {
+          stats.completed++;
+        } else if (r.status === 'pending') {
+          stats.pending++;
+          
+          const eventDateStr = r.event_date;
+          const eventTime = new Date(eventDateStr).getTime();
+          
+          // Check if snoozed currently or marked as seen
+          const isSnoozed = r.snoozed_until && new Date(r.snoozed_until) > now;
+          const isAcknowledged = isSnoozed || r.seen;
+          
+          if (!isAcknowledged) {
+            const diffDays = Math.ceil((eventTime - todayTime) / (1000 * 60 * 60 * 24));
+            
+            if (diffDays < 0) {
+              stats.overdue++;
+            } else if (diffDays === 0) {
+              stats.today++;
+            } else if (diffDays <= r.notify_before_days) {
+              stats.upcoming++;
+            }
+          }
+        }
+      });
+
+      return stats;
+    } catch (error) {
+      console.error('❌ Error getting reminder stats:', error);
+      return { pending: 0, today: 0, upcoming: 0, overdue: 0, completed: 0 };
+    }
+  }
+
+  async getActiveRemindersCount(mode: 'regular' | 'itr', userId: string, isAdmin: boolean): Promise<number> {
+    try {
+      const reminders = await this.getReminders(mode, userId, isAdmin);
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+      const todayTime = new Date(todayStr).getTime();
+      
+      let count = 0;
+      reminders.forEach(r => {
+        if (r.status === 'pending' && !r.seen) {
+          const isSnoozed = r.snoozed_until && new Date(r.snoozed_until) > now;
+          if (!isSnoozed) {
+            const eventTime = new Date(r.event_date).getTime();
+            const diffDays = Math.ceil((eventTime - todayTime) / (1000 * 60 * 60 * 24));
+            
+            if (diffDays <= r.notify_before_days) {
+              count++;
+            }
+          }
+        }
+      });
+      return count;
+    } catch (error) {
+      console.error('❌ Error getting active reminders count:', error);
+      return 0;
     }
   }
 }

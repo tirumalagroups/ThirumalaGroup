@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useFormArrowNavigation } from '../hooks/useFormArrowNavigation';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
@@ -11,7 +12,10 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
 import { useCreateCashBookEntry, useBulkCashBookOperations } from '../hooks/useCashBookData';
 import ModeLabel from '../components/UI/ModeLabel';
+import { useBook } from '../contexts/BookContext';
 import CustomCalendar from '../components/UI/CustomCalendar';
+import { useOffline } from '../contexts/OfflineContext';
+import { fetchAndCacheMasterData } from '../lib/offlineMasterData';
 import { useDropdownData, useRecentEntriesByDate } from '../hooks/useDashboardData';
 import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '../lib/queryClient';
@@ -29,6 +33,9 @@ import {
   Database,
   Copy,
   ExternalLink,
+  Download,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 interface NewEntryForm {
@@ -53,7 +60,30 @@ interface NewEntryForm {
 const NewEntry: React.FC = () => {
   const { user } = useAuth();
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
+  const { isOnline } = useOffline();
+  const [isCacheSyncing, setIsCacheSyncing] = useState(false);
   const navigate = useNavigate();
+  const formRef = useRef<HTMLFormElement>(null);
+
+  // Enable arrow key navigation only in non-finance modes (Regular/ITR)
+  useFormArrowNavigation(formRef, tableMode !== 'finance');
+
+  const handleManualCacheRefresh = async () => {
+    setIsCacheSyncing(true);
+    try {
+      await fetchAndCacheMasterData(tableMode === 'itr' ? 'itr' : 'regular');
+      toast.success('Offline cache updated successfully!');
+      queryClient.invalidateQueries({ queryKey: queryKeys.dropdowns.companies() });
+      await loadUsersData();
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to refresh offline cache');
+    } finally {
+      setIsCacheSyncing(false);
+    }
+  };
+
   const [vehicleStats, setVehicleStats] = useState<{ expired: number; expiring: number } | null>(null);
   const [bgStats, setBgStats] = useState<{ expired: number; expiring: number } | null>(null);
   const [driverStats, setDriverStats] = useState<{ expired: number; expiring: number } | null>(null);
@@ -191,6 +221,7 @@ const NewEntry: React.FC = () => {
   const { data: recentEntries, isLoading: recentLoading } = useRecentEntriesByDate(entry.date);
 
   const [dualEntryEnabled, setDualEntryEnabled] = useState(false);
+  const [showAllRecent, setShowAllRecent] = useState(false);
   const [mainDateInput, setMainDateInput] = useState('');
   const [dualDateInput, setDualDateInput] = useState('');
   const [showMainCalendar, setShowMainCalendar] = useState(false);
@@ -436,7 +467,7 @@ const NewEntry: React.FC = () => {
     sqlCommand: '',
   });
 
-  // Check if payment_mode column exists on mount
+  // Check if payment_mode column exists on mount and mode changes
   useEffect(() => {
     const checkPaymentModeColumn = async () => {
       setPaymentModeColumnStatus(prev => ({ ...prev, checking: true }));
@@ -461,7 +492,7 @@ const NewEntry: React.FC = () => {
     };
     
     checkPaymentModeColumn();
-  }, []);
+  }, [tableMode]);
 
   // Copy SQL to clipboard
   const copySQLToClipboard = () => {
@@ -699,6 +730,11 @@ const NewEntry: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing is blocked.');
+      return;
+    }
 
     // Validate main entry (all mandatory except credit/debit where either is required)
     if (
@@ -974,8 +1010,11 @@ const NewEntry: React.FC = () => {
       setTimeout(() => {
         if (dateRef.current) {
           dateRef.current.focus();
+          try {
+            dateRef.current.select();
+          } catch (err) {}
         }
-      }, 100);
+      }, 150);
       
       // Invalidate React Query cache to refresh recent entries
       console.log('🔄 Invalidating cache for date:', entry.date);
@@ -1591,25 +1630,8 @@ const NewEntry: React.FC = () => {
                   )
                 ),
                 users: user?.username || 'admin',
+                book_id: currentBook?.id || undefined,
                 sale_qty: sanitizeNumber(
-                  getFieldValue(
-                    row,
-                    [
-                      'Purchase Qty',
-                      'Purchase Quantity',
-                      'Quantity Purchased',
-                      'PurchaseQty',
-                      'PurchaseQuantity',
-                      'QuantityPurchased',
-                      'Buy Qty',
-                      'BuyQty',
-                      'Buy Quantity',
-                      'BuyQuantity',
-                    ],
-                    0
-                  )
-                ),
-                purchase_qty: sanitizeNumber(
                   getFieldValue(
                     row,
                     [
@@ -1625,6 +1647,24 @@ const NewEntry: React.FC = () => {
                       'SalesQuantity',
                       'Qty Sold',
                       'QtySold',
+                    ],
+                    0
+                  )
+                ),
+                purchase_qty: sanitizeNumber(
+                  getFieldValue(
+                    row,
+                    [
+                      'Purchase Qty',
+                      'Purchase Quantity',
+                      'Quantity Purchased',
+                      'PurchaseQty',
+                      'PurchaseQuantity',
+                      'QuantityPurchased',
+                      'Buy Qty',
+                      'BuyQty',
+                      'Buy Quantity',
+                      'BuyQuantity',
                     ],
                     0
                   )
@@ -1794,11 +1834,38 @@ const NewEntry: React.FC = () => {
         </div>
       )}
       
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-3 rounded-lg shadow-sm flex items-center gap-2 m-4 no-print flex-shrink-0">
+          <AlertCircle className="h-4 w-4 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-xs font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-[10px] text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header - Fixed at top */}
       <div className='flex items-center justify-between p-1 bg-white border-b border-gray-200 flex-shrink-0'>
         <div>
           <div className='flex items-center gap-2 mb-1'>
-            <h1 className='text-lg font-bold text-gray-900'>New Entry</h1>
+            <h1 className='text-lg font-bold text-gray-900 flex items-center gap-2'>
+              New Entry
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {currentBook?.book_code || 'No Book'}
+              </span>
+              {!isOnline && (
+                <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1">
+                  📦 Using Offline Cache
+                </span>
+              )}
+            </h1>
             <ModeLabel />
           </div>
           <p className='text-xs text-gray-600'>
@@ -1823,6 +1890,18 @@ const NewEntry: React.FC = () => {
               </div>
             </div>
             <div className='flex gap-1'>
+              {isOnline && (
+                <Button
+                  variant='secondary'
+                  onClick={handleManualCacheRefresh}
+                  size='sm'
+                  className='text-xs bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-800 font-bold'
+                  icon={Download}
+                  disabled={isCacheSyncing}
+                >
+                  {isCacheSyncing ? 'Caching...' : 'Cache Offline Data'}
+                </Button>
+              )}
               <Button
                 variant='secondary'
                 onClick={loadUsersData}
@@ -1842,7 +1921,7 @@ const NewEntry: React.FC = () => {
         <div className='flex flex-wrap gap-2 px-2 py-1.5 bg-gray-50 border-b border-gray-200 flex-shrink-0'>
           {vehicleStats && (
             <div 
-              onClick={() => navigate('/vehicles')}
+              onClick={() => navigate('/vehicles?highlightExpiring=true')}
               className='bg-white border border-gray-200 hover:border-gray-300 transition-all rounded px-2.5 py-1 flex items-center gap-1.5 cursor-pointer shadow-sm text-[11px]'
             >
               <span className='font-bold text-gray-700'>Vehicle Expiry:</span>
@@ -1861,7 +1940,7 @@ const NewEntry: React.FC = () => {
           )}
           {bgStats && (
             <div 
-              onClick={() => navigate('/bank-guarantees')}
+              onClick={() => navigate('/bank-guarantees?highlightExpiring=true')}
               className='bg-white border border-gray-200 hover:border-gray-300 transition-all rounded px-2.5 py-1 flex items-center gap-1.5 cursor-pointer shadow-sm text-[11px]'
             >
               <span className='font-bold text-gray-700'>Bank Guarantee Expiry:</span>
@@ -1880,7 +1959,7 @@ const NewEntry: React.FC = () => {
           )}
           {driverStats && (
             <div 
-              onClick={() => navigate('/drivers')}
+              onClick={() => navigate('/drivers?highlightExpiring=true')}
               className='bg-white border border-gray-200 hover:border-gray-300 transition-all rounded px-2.5 py-1 flex items-center gap-1.5 cursor-pointer shadow-sm text-[11px]'
             >
               <span className='font-bold text-gray-700'>Driver Expiry:</span>
@@ -1903,12 +1982,144 @@ const NewEntry: React.FC = () => {
       {/* Main Content - Vertical Layout */}
       <div className='flex-1 p-1'>
         <div className='w-full max-w-7xl mx-auto flex flex-col'>
+          {/* Recent Transactions Section */}
+          <div className='w-full mb-4'>
+            <Card
+              title='Recent Transactions'
+              subtitle={`Entries for ${format(new Date(entry.date), 'dd-MMM-yyyy')} (LIFO - Last In First Out)`}
+              className='bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200 shadow-md'
+            >
+              {recentLoading ? (
+                <div className='text-center py-8'>
+                  <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto'></div>
+                  <p className='mt-2 text-gray-600 font-medium text-base'>Loading transactions...</p>
+                </div>
+              ) : !recentEntries || !Array.isArray(recentEntries) || recentEntries.length === 0 ? (
+                <div className='text-center py-8 text-gray-500'>
+                  <div className='text-lg font-medium mb-2'>No transactions found for {format(new Date(entry.date), 'dd-MMM-yyyy')}</div>
+                  <div className='text-sm'>Try selecting a different date or create a new entry for this date.</div>
+                </div>
+              ) : (
+                <div className='w-full overflow-x-auto border border-gray-200 rounded-lg shadow-sm bg-white'>
+                  <div className='max-h-96 overflow-y-auto custom-scrollbar'>
+                    <table className='w-full text-[13px] table-fixed min-w-full divide-y divide-gray-200'>
+                      <thead className='sticky top-0 bg-gray-50 z-10'>
+                        <tr className='border-b border-gray-200'>
+                          <th className='w-[4%] xl:w-[3%] px-1.5 py-2 text-center font-semibold text-gray-700 text-[14px] leading-tight'>
+                            S.No
+                          </th>
+                          <th className='w-[10%] xl:w-[8%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Date
+                          </th>
+                          <th className='w-[13%] xl:w-[11%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Company
+                          </th>
+                          <th className='w-[13%] xl:w-[11%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Account
+                          </th>
+                          <th className='w-[13%] xl:w-[11%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Sub Account
+                          </th>
+                          <th className='w-[22%] xl:w-[26%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Particulars
+                          </th>
+                          <th className='w-[9%] xl:w-[8%] px-1.5 py-2 text-right font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Credit
+                          </th>
+                          <th className='w-[9%] xl:w-[8%] px-1.5 py-2 text-right font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Debit
+                          </th>
+                          <th className='w-[9%] xl:w-[8%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Payment Mode
+                          </th>
+                          <th className='w-[8%] xl:w-[6%] px-1.5 py-2 text-left font-semibold text-gray-700 text-[14px] leading-tight'>
+                            Staff
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className='divide-y divide-gray-100'>
+                        {Array.isArray(recentEntries) && (showAllRecent ? recentEntries : recentEntries.slice(0, 4)).map((entry: any, index: number) => (
+                          <tr
+                            key={entry.id}
+                            className={`hover:bg-gray-50 transition-colors h-[38px] md:h-[40px] ${
+                              index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
+                            }`}
+                          >
+                            <td className='w-[4%] xl:w-[3%] px-1.5 py-1.5 text-center font-medium text-gray-600 text-[13px]'>{index + 1}</td>
+                            <td className='w-[10%] xl:w-[8%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 leading-tight'>
+                              <div className='truncate'>{format(new Date(entry.c_date), 'dd-MMM-yy')}</div>
+                              {entry.pending_sync && (
+                                <span className='inline-flex items-center text-[9px] font-bold text-amber-600 bg-amber-50 px-1 py-0.2 rounded border border-amber-200 animate-pulse'>
+                                  Sync
+                                </span>
+                              )}
+                            </td>
+                            <td className='w-[13%] xl:w-[11%] px-1.5 py-1.5 font-bold text-blue-600 text-[13px] truncate' title={entry.company_name}>
+                              {entry.company_name}
+                            </td>
+                            <td className='w-[13%] xl:w-[11%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 truncate' title={entry.acc_name?.replace(/\[DELETED\]\s*/g, '')}>
+                              {entry.acc_name?.replace(/\[DELETED\]\s*/g, '') || '-'}
+                            </td>
+                            <td className='w-[13%] xl:w-[11%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 truncate' title={entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '')}>
+                              {entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '') || '-'}
+                            </td>
+                            <td
+                              className='w-[22%] xl:w-[26%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 truncate'
+                              title={entry.particulars?.replace(/\[DELETED\]\s*/g, '')}
+                            >
+                              {entry.particulars?.replace(/\[DELETED\]\s*/g, '') || '-'}
+                            </td>
+                            <td className='w-[9%] xl:w-[8%] px-1.5 py-1.5 text-right font-semibold text-green-750 text-[13px] tabular-nums'>
+                              {entry.credit > 0
+                                ? `${entry.credit.toLocaleString()}`
+                                : '-'}
+                            </td>
+                            <td className='w-[9%] xl:w-[8%] px-1.5 py-1.5 text-right font-semibold text-red-750 text-[13px] tabular-nums'>
+                              {entry.debit > 0
+                                ? `${entry.debit.toLocaleString()}`
+                                : '-'}
+                            </td>
+                            <td className='w-[9%] xl:w-[8%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 truncate' title={entry.payment_mode || 'No payment mode'}>
+                              {entry.payment_mode && String(entry.payment_mode).trim() ? (entry.payment_mode === 'Online' ? 'Double' : entry.payment_mode === 'Bank Transfer' ? 'Bank' : String(entry.payment_mode).trim()) : '-'}
+                            </td>
+                            <td className='w-[8%] xl:w-[6%] px-1.5 py-1.5 text-[13px] font-medium text-gray-800 truncate' title={entry.staff}>
+                              {entry.staff}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {Array.isArray(recentEntries) && recentEntries.length > 4 && (
+                    <div className='px-4 py-2 border-t border-gray-200 bg-gray-50 flex justify-center'>
+                      <button
+                        type='button'
+                        onClick={() => setShowAllRecent(!showAllRecent)}
+                        className='text-xs font-bold text-blue-600 hover:text-blue-800 focus:outline-none flex items-center gap-1 transition-all'
+                      >
+                        {showAllRecent ? (
+                          <>
+                            Show Less <ChevronUp className="w-3.5 h-3.5" />
+                          </>
+                        ) : (
+                          <>
+                            Show All ({recentEntries.length} entries) <ChevronDown className="w-3.5 h-3.5" />
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          </div>
+
           {/* Entry Form - Full Panel */}
           <div className='w-full'>
             <Card
               className='p-2 bg-gradient-to-r from-green-50 to-emerald-50 border-green-200 shadow-lg'
             >
-              <form onSubmit={handleSubmit} className='space-y-2 text-xs' style={{ fontFamily: 'Times New Roman', fontSize: '12px' }}>
+              <form ref={formRef} onSubmit={handleSubmit} className='space-y-2 text-xs' style={{ fontFamily: 'Times New Roman', fontSize: '12px' }}>
                 {/* Dual Entry Toggle */}
                 <div className='flex items-center justify-center mb-0.5 p-1 bg-blue-50 rounded border border-blue-200'>
                   <input
@@ -1917,6 +2128,7 @@ const NewEntry: React.FC = () => {
                     checked={dualEntryEnabled}
                     onChange={e => setDualEntryEnabled(e.target.checked)}
                     className='mr-3 w-4 h-4'
+                    tabIndex={-1}
                   />
                   <label
                     htmlFor='dualEntryEnabled'
@@ -2140,27 +2352,18 @@ const NewEntry: React.FC = () => {
                   <div className='space-y-0.5 md:col-span-2'>
                     <SearchableSelect
                       ref={staffRef}
-                      tabIndex={-1}
                       label='Staff'
                       value={entry.staff}
                       onChange={value => {
                         setEntry(prev => ({ ...prev, staff: value }));
                         setSessionStaff(value);
                       }}
-                      onSelect={() => {
-                        // Auto-navigate to credit amount when staff is selected
-                        setTimeout(() => {
-                          if (creditRef.current) {
-                            creditRef.current.focus();
-                          }
-                        }, 100);
-                      }}
                       options={users}
                       placeholder='Select staff...'
-                      onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => handleKeyDown(e, creditRef)}
                       required
                       size='sm'
                       className='staff-field'
+                      tabIndex={-1}
                     />
                     <div className='flex gap-1'>
                       <Button
@@ -2209,10 +2412,10 @@ const NewEntry: React.FC = () => {
                         if (debitRef.current && !debitRef.current.disabled) {
                           debitRef.current.focus();
                         } else {
-                          if (entry.paymentMode) {
-                            if (quantityCheckedRef.current) quantityCheckedRef.current.focus();
-                          } else {
-                            if (paymentModeRef.current) paymentModeRef.current.focus();
+                          if (dualEntryEnabled && dualCompanyNameRef.current) {
+                            dualCompanyNameRef.current.focus();
+                          } else if (saveBtnRef.current) {
+                            saveBtnRef.current.focus();
                           }
                         }
                       }
@@ -2238,10 +2441,10 @@ const NewEntry: React.FC = () => {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
-                        if (entry.paymentMode) {
-                          if (quantityCheckedRef.current) quantityCheckedRef.current.focus();
-                        } else {
-                          if (paymentModeRef.current) paymentModeRef.current.focus();
+                        if (dualEntryEnabled && dualCompanyNameRef.current) {
+                          dualCompanyNameRef.current.focus();
+                        } else if (saveBtnRef.current) {
+                          saveBtnRef.current.focus();
                         }
                       }
                     }}
@@ -2253,20 +2456,11 @@ const NewEntry: React.FC = () => {
                   />
                   <SearchableSelect
                     ref={paymentModeRef}
-                    tabIndex={entry.paymentMode ? -1 : undefined}
                     label='Payment Mode'
                     value={entry.paymentMode}
                     onChange={val => {
                       setEntry(prev => ({ ...prev, paymentMode: val }));
                       localStorage.setItem('lastSelectedPaymentMode', val);
-                    }}
-                    onSelect={() => {
-                      // Auto-navigate to Quantity Details checkbox when payment mode is selected
-                      setTimeout(() => {
-                        if (quantityCheckedRef.current) {
-                          quantityCheckedRef.current.focus();
-                        }
-                      }, 100);
                     }}
                     options={[
                       { value: '', label: 'Select payment mode...' },
@@ -2275,9 +2469,9 @@ const NewEntry: React.FC = () => {
                       { value: 'Online', label: 'Double' }
                     ]}
                     placeholder='Select payment mode...'
-                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => handleKeyDown(e, quantityCheckedRef)}
                     required
                     size='sm'
+                    tabIndex={-1}
                   />
                 </div>
 
@@ -2294,30 +2488,7 @@ const NewEntry: React.FC = () => {
                         quantityChecked: e.target.checked,
                       }))
                     }
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        const nextChecked = !entry.quantityChecked;
-                        setEntry(prev => ({
-                          ...prev,
-                          quantityChecked: nextChecked,
-                        }));
-                        
-                        if (nextChecked) {
-                          setTimeout(() => {
-                            if (purchaseQRef.current) purchaseQRef.current.focus();
-                          }, 100);
-                        } else {
-                          setTimeout(() => {
-                            if (dualEntryEnabled && dualCompanyNameRef.current) {
-                              dualCompanyNameRef.current.focus();
-                            } else if (saveBtnRef.current) {
-                              saveBtnRef.current.focus();
-                            }
-                          }, 100);
-                        }
-                      }
-                    }}
+                    tabIndex={-1}
                     className='w-4 h-4'
                   />
                   <label
@@ -2346,13 +2517,13 @@ const NewEntry: React.FC = () => {
                           purchaseQ: saleVal ? '' : prev.purchaseQ // Clear purchase if sale has value
                         }));
                       }}
-                      onKeyDown={(e) => handleKeyDown(e, saleQRef)}
                       disabled={!!entry.purchaseQ}
                       placeholder='0'
                       type='number'
                       min='0'
                       step='0.01'
                       size='sm'
+                      tabIndex={-1}
                     />
                     <Input
                       ref={saleQRef}
@@ -2367,22 +2538,13 @@ const NewEntry: React.FC = () => {
                           saleQ: purchaseVal ? '' : prev.saleQ // Clear sale if purchase has value
                         }));
                       }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          if (dualEntryEnabled && dualCompanyNameRef.current) {
-                            dualCompanyNameRef.current.focus();
-                          } else if (saveBtnRef.current) {
-                            saveBtnRef.current.focus();
-                          }
-                        }
-                      }}
                       disabled={!!entry.saleQ}
                       placeholder='0'
                       type='number'
                       min='0'
                       step='0.01'
                       size='sm'
+                      tabIndex={-1}
                     />
                   </div>
                 )}
@@ -2508,7 +2670,18 @@ const NewEntry: React.FC = () => {
                           }
                         }}
                         disabled={!!entry.credit || !!dualEntry.debit || (!entry.credit && !entry.debit)}
-                        onKeyDown={(e) => handleKeyDown(e, dualDebitRef)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (dualDebitRef.current && !dualDebitRef.current.disabled) {
+                              dualDebitRef.current.focus();
+                            } else {
+                              if (saveBtnRef.current) {
+                                saveBtnRef.current.focus();
+                              }
+                            }
+                          }
+                        }}
                         placeholder='Enter credit amount'
                         type='number'
                         min='0'
@@ -2528,7 +2701,14 @@ const NewEntry: React.FC = () => {
                           }
                         }}
                         disabled={!!entry.debit || !!dualEntry.credit || (!entry.credit && !entry.debit)}
-                        onKeyDown={(e) => handleKeyDown(e, dualQuantityCheckedRef)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (saveBtnRef.current) {
+                              saveBtnRef.current.focus();
+                            }
+                          }
+                        }}
                         placeholder='Enter debit amount'
                         type='number'
                         min='0'
@@ -2552,29 +2732,8 @@ const NewEntry: React.FC = () => {
                               purchaseQ: e.target.checked ? prev.purchaseQ : '',
                             }))
                           }
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              const nextChecked = !dualEntry.quantityChecked;
-                              setDualEntry(prev => ({
-                                ...prev,
-                                quantityChecked: nextChecked,
-                                saleQ: nextChecked ? prev.saleQ : '',
-                                purchaseQ: nextChecked ? prev.purchaseQ : '',
-                              }));
-                              
-                              if (nextChecked) {
-                                setTimeout(() => {
-                                  if (dualPurchaseQRef.current) dualPurchaseQRef.current.focus();
-                                }, 100);
-                              } else {
-                                setTimeout(() => {
-                                  if (saveBtnRef.current) saveBtnRef.current.focus();
-                                }, 100);
-                              }
-                            }
-                          }}
                           id='dualQuantityChecked'
+                          tabIndex={-1}
                         />
                         <label
                           htmlFor='dualQuantityChecked'
@@ -2604,11 +2763,11 @@ const NewEntry: React.FC = () => {
                                 dualPurchaseQManuallyEdited.current = false;
                               }
                             }}
-                            onKeyDown={(e) => handleKeyDown(e, dualSaleQRef)}
                             disabled={!entry.purchaseQ}
                             placeholder='0'
                             type='number'
                             min='0'
+                            tabIndex={-1}
                           />
                           <Input
                             ref={dualSaleQRef}
@@ -2628,18 +2787,11 @@ const NewEntry: React.FC = () => {
                                 dualSaleQManuallyEdited.current = false;
                               }
                             }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                if (saveBtnRef.current) {
-                                  saveBtnRef.current.focus();
-                                }
-                              }
-                            }}
                             disabled={!entry.saleQ}
                             placeholder='0'
                             type='number'
                             min='0'
+                            tabIndex={-1}
                           />
                         </div>
                       )}
@@ -2707,8 +2859,19 @@ const NewEntry: React.FC = () => {
                       dualSaleQManuallyEdited.current = false;
                       // Accounts are now managed by React Query
                       setSubAccounts([]);
+
+                      // Focus back to main Date field
+                      setTimeout(() => {
+                        if (dateRef.current) {
+                          dateRef.current.focus();
+                          try {
+                            dateRef.current.select();
+                          } catch (err) {}
+                        }
+                      }, 150);
                     }}
                     className='px-4 py-1 text-xs font-bold'
+                    tabIndex={-1}
                   >
                     Reset
                   </Button>
@@ -2716,140 +2879,6 @@ const NewEntry: React.FC = () => {
               </form>
             </Card>
           </div>
-
-          {/* Recent Transactions Section */}
-          <div className='w-full mt-4'>
-            <Card
-              title='Recent Transactions'
-              subtitle={`Entries for ${format(new Date(entry.date), 'dd-MMM-yyyy')} (LIFO - Last In First Out)`}
-              className='bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200'
-            >
-              {recentLoading ? (
-                <div className='text-center py-8'>
-                  <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto'></div>
-                  <p className='mt-2 text-gray-600'>Loading transactions...</p>
-                </div>
-              ) : !recentEntries || !Array.isArray(recentEntries) || recentEntries.length === 0 ? (
-                <div className='text-center py-8 text-gray-500'>
-                  <div className='text-lg font-medium mb-2'>No transactions found for {format(new Date(entry.date), 'dd-MMM-yyyy')}</div>
-                  <div className='text-sm'>Try selecting a different date or create a new entry for this date.</div>
-                </div>
-              ) : (
-                <div className='overflow-x-auto'>
-                  <div className='max-h-48 overflow-y-auto'>
-                    <table className='w-full text-xs table-fixed'>
-                      <thead className='sticky top-0 bg-gray-50 z-10'>
-                        <tr className='border-b border-gray-200'>
-                          <th className='w-12 px-1 py-0 text-left font-medium text-gray-700'>
-                            S.No
-                          </th>
-                          <th className='w-16 px-1 py-0 text-left font-medium text-gray-700'>
-                            Date
-                          </th>
-                          <th className='w-20 px-1 py-0 text-left font-medium text-gray-700'>
-                            Company
-                          </th>
-                          <th className='w-20 px-1 py-0 text-left font-medium text-gray-700'>
-                            Account
-                          </th>
-                          <th className='w-20 px-1 py-0 text-left font-medium text-gray-700'>
-                            Sub Account
-                          </th>
-                          <th className='w-32 px-1 py-0 text-left font-medium text-gray-700'>
-                            Particulars
-                          </th>
-                          <th className='w-16 px-1 py-0 text-right font-medium text-gray-700'>
-                            Credit
-                          </th>
-                          <th className='w-16 px-1 py-0 text-right font-medium text-gray-700'>
-                            Debit
-                          </th>
-                          <th className='w-16 px-1 py-0 text-left font-medium text-gray-700'>
-                            Payment Mode
-                          </th>
-                          <th className='w-16 px-1 py-0 text-left font-medium text-gray-700'>
-                            Staff
-                          </th>
-                          <th className='w-20 px-1 py-0 text-center font-medium text-gray-700'>
-                            Status
-                          </th>
-                          <th className='w-20 px-1 py-0 text-center font-medium text-gray-700'>
-                            Entry Date and Time
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Array.isArray(recentEntries) && recentEntries.map((entry: any, index: number) => (
-                          <tr
-                            key={entry.id}
-                            className={`border-b hover:bg-gray-50 transition-colors ${
-                              index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
-                            }`}
-                          >
-                            <td className='w-12 px-1 py-0 font-medium text-xs'>{index + 1}</td>
-                            <td className='w-16 px-1 py-0 text-xs'>
-                              {format(new Date(entry.c_date), 'dd-MMM-yy')}
-                            </td>
-                            <td className='w-20 px-1 py-0 font-medium text-blue-600 text-xs truncate' title={entry.company_name}>
-                              {entry.company_name}
-                            </td>
-                            <td className='w-20 px-1 py-0 text-xs truncate' title={entry.acc_name?.replace(/\[DELETED\]\s*/g, '')}>
-                              {entry.acc_name?.replace(/\[DELETED\]\s*/g, '') || '-'}
-                            </td>
-                            <td className='w-20 px-1 py-0 text-xs truncate' title={entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '')}>
-                              {entry.sub_acc_name?.replace(/\[DELETED\]\s*/g, '') || '-'}
-                            </td>
-                            <td
-                              className='w-32 px-1 py-0 text-xs truncate'
-                              title={entry.particulars?.replace(/\[DELETED\]\s*/g, '')}
-                            >
-                              {entry.particulars?.replace(/\[DELETED\]\s*/g, '') || '-'}
-                            </td>
-                            <td className='w-16 px-1 py-0 text-right font-medium text-green-600 text-xs'>
-                              {entry.credit > 0
-                                ? `${entry.credit.toLocaleString()}`
-                                : '-'}
-                            </td>
-                            <td className='w-16 px-1 py-0 text-right font-medium text-red-600 text-xs'>
-                              {entry.debit > 0
-                                ? `${entry.debit.toLocaleString()}`
-                                : '-'}
-                            </td>
-                            <td className='w-16 px-1 py-0 text-xs truncate' title={entry.payment_mode || 'No payment mode'}>
-                              {entry.payment_mode && String(entry.payment_mode).trim() ? (entry.payment_mode === 'Online' ? 'Double' : entry.payment_mode === 'Bank Transfer' ? 'Bank' : String(entry.payment_mode).trim()) : '-'}
-                            </td>
-                            <td className='w-16 px-1 py-0 text-xs truncate' title={entry.staff}>
-                              {entry.staff}
-                            </td>
-                            <td className='w-20 px-1 py-0 text-center'>
-                              {entry.approved ? (
-                                <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800'>
-                                  Approved
-                                </span>
-                              ) : (
-                                <span className='inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800'>
-                                  Pending
-                                </span>
-                              )}
-                            </td>
-                            <td className='w-20 px-1 py-0 text-center text-xs'>
-                              <div className='text-xs'>
-                                {format(new Date(entry.c_date), 'dd/MM/yyyy')}
-                              </div>
-                              <div className='text-xs text-gray-500'>
-                                {entry.entry_time ? format(new Date(entry.entry_time), 'HH:mm:ss a') : 'N/A'}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </Card>
-          </div>
-
         </div>
       </div>
 

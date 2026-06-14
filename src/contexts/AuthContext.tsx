@@ -1,13 +1,16 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { supabase, supabaseHelpers } from '../lib/supabase';
-import { supabaseDB } from '../lib/supabaseDatabase';
-import toast from 'react-hot-toast';
+import { supabase } from '../lib/supabase';
 import bcrypt from 'bcryptjs';
+import { queryClient } from '../lib/queryClient';
+import { supabaseDB } from '../lib/supabaseDatabase';
+import { initAudioContext } from '../utils/reminderSound';
 
-type ModeKey = 'regular' | 'itr';
-const MODE_VALUES: ModeKey[] = ['regular', 'itr'];
-const getStoredMode = (): ModeKey =>
-  (localStorage.getItem('table_mode') as ModeKey) === 'itr' ? 'itr' : 'regular';
+type ModeKey = 'regular' | 'itr' | 'finance';
+const MODE_VALUES: ModeKey[] = ['regular', 'itr', 'finance'];
+const getStoredMode = (): ModeKey => {
+  const mode = sessionStorage.getItem('table_mode') || localStorage.getItem('table_mode');
+  return (mode === 'itr' ? 'itr' : mode === 'finance' ? 'finance' : 'regular') as ModeKey;
+};
 const createEmptyModeFeatureMap = () =>
   MODE_VALUES.reduce(
     (acc, mode) => {
@@ -44,6 +47,35 @@ const ADMIN_FEATURES = [
   'drivers',
   'bank_guarantees',
   'users',
+  'reminders',
+  'delete_entry',
+  'sync_center',
+  // Finance Mode Features
+  'finance_dashboard',
+  'loan_entry',
+  'edit_loan_entry',
+  'partners',
+  'search',
+  'calculator',
+  'capital_entry',
+  'camera',
+  'daybook',
+  'general_ledger',
+  'cd_ledger',
+  'stbd_ledger',
+  'hp_ledger',
+  'tbd_ledger',
+  'dues_ledger',
+  'pl',
+  'final_statement',
+  'business_report',
+  'partner_performance',
+  'new_customers',
+  'phone_editor',
+  'aadhaar_search',
+  'logs',
+  'user_access_management',
+  'book_management',
 ];
 const getFeaturesForMode = (
   featuresByMode: Record<ModeKey, string[]>,
@@ -63,7 +95,7 @@ interface User {
   is_admin: boolean;
   features: string[];
   featuresByMode?: Record<ModeKey, string[]>;
-  mode?: 'regular' | 'itr' | null;
+  mode?: 'regular' | 'itr' | 'finance' | null;
 }
 
 interface AuthContextType {
@@ -72,8 +104,9 @@ interface AuthContextType {
   login: (
     username: string,
     password: string
-  ) => Promise<{ success: boolean; error?: string; userMode?: 'regular' | 'itr' | null }>;
+  ) => Promise<{ success: boolean; error?: string; userMode?: 'regular' | 'itr' | 'finance' | null }>;
   logout: () => Promise<void>;
+  reloadPermissions: () => Promise<void>;
   changePassword: (
     currentPassword: string,
     newPassword: string
@@ -153,6 +186,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     });
 
+    // Load finance permissions from finance_user_permissions table
+    try {
+      const { data: financeAccess, error: financeAccessError } = await supabase
+        .from('finance_user_permissions')
+        .select('feature_key')
+        .eq('user_id', userId);
+
+      if (!financeAccessError && financeAccess) {
+        financeAccess.forEach(item => {
+          if (item.feature_key && !map.finance.includes(item.feature_key)) {
+            map.finance.push(item.feature_key);
+          }
+        });
+      }
+    } catch (err) {
+      console.error('Error loading finance permissions:', err);
+    }
+
     return { featuresByMode: map, modeColumnExists };
   };
 
@@ -188,9 +239,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             }
 
             setUser(parsedUser);
+            supabaseDB.setUserId(parsedUser.id);
           } else {
             sessionStorage.removeItem('thirumala_user');
             sessionStorage.removeItem('thirumala_session_time');
+            supabaseDB.setUserId('');
           }
         }
       } catch (error) {
@@ -205,7 +258,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   useEffect(() => {
     const handleModeChange = (event: Event) => {
       const detail = (event as CustomEvent<ModeKey>).detail;
-      const nextMode = detail === 'itr' ? 'itr' : 'regular';
+      const nextMode = detail === 'itr' ? 'itr' : detail === 'finance' ? 'finance' : 'regular';
       setUser(prev => {
         if (!prev) return prev;
         if (prev.is_admin) {
@@ -305,8 +358,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       });
       
       setUser(userData);
+      supabaseDB.setUserId(userData.id);
       sessionStorage.setItem('thirumala_user', JSON.stringify(userData));
       sessionStorage.setItem('thirumala_session_time', Date.now().toString());
+
+      // Unlock/init audio context since the login was a button click interaction
+      initAudioContext();
+
+      // Trigger background sync of master data cache
+      if (navigator.onLine) {
+        import('../lib/offlineMasterData').then(({ syncAllMasterData }) => {
+          syncAllMasterData().catch(err => console.error('Error syncing master data on login:', err));
+        }).catch(err => console.error('Error importing offlineMasterData:', err));
+      }
+
       return { success: true, userMode: userData.mode };
     } catch (err) {
       console.error('Login error:', err);
@@ -316,11 +381,49 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const logout = async () => {
     try {
-      setUser(null);
+      // Clear localStorage items
+      localStorage.removeItem('table_mode');
+      localStorage.removeItem('selectedMode');
+      localStorage.removeItem('regularSelectedBook');
+      localStorage.removeItem('itrSelectedBook');
+      localStorage.removeItem('financeSelectedBook');
+      localStorage.removeItem('currentBookId');
+
+      // Clear sessionStorage items
       sessionStorage.removeItem('thirumala_user');
       sessionStorage.removeItem('thirumala_session_time');
+      sessionStorage.removeItem('table_mode');
+      sessionStorage.removeItem('selectedMode');
+
+      // Clear React Query cache
+      queryClient.clear();
+
+      setUser(null);
+      supabaseDB.setUserId('');
     } catch (error) {
       console.error('Logout error:', error);
+    }
+  };
+
+  const reloadPermissions = async () => {
+    if (!user) return;
+    try {
+      const { featuresByMode } = await loadFeaturesForUser(user.id, user.is_admin);
+      const activeMode = getStoredMode();
+      const nextFeatures = user.is_admin
+        ? [...ADMIN_FEATURES]
+        : getFeaturesForMode(featuresByMode, activeMode);
+      
+      const updatedUser = {
+        ...user,
+        features: nextFeatures,
+        featuresByMode,
+      };
+      
+      setUser(updatedUser);
+      sessionStorage.setItem('thirumala_user', JSON.stringify(updatedUser));
+    } catch (error) {
+      console.error('Error reloading permissions:', error);
     }
   };
 
@@ -391,7 +494,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, logout, changePassword, isAdmin, isAuthenticated }}
+      value={{ user, loading, login, logout, reloadPermissions, changePassword, isAdmin, isAuthenticated }}
     >
       {children}
     </AuthContext.Provider>

@@ -3,8 +3,9 @@ import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import SearchableSelect from '../components/UI/SearchableSelect';
 import { supabaseDB } from '../lib/supabaseDatabase';
-import { getTableName } from '../lib/tableNames';
 import { useAuth } from '../contexts/AuthContext';
+import { useBook } from '../contexts/BookContext';
+import { useTableMode } from '../contexts/TableModeContext';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 import {
@@ -43,6 +44,8 @@ interface DeletedRecord {
 
 const DeletedRecords: React.FC = () => {
   const { isAdmin } = useAuth();
+  const { currentBook } = useBook();
+  const { mode: tableMode } = useTableMode();
   const [deletedRecords, setDeletedRecords] = useState<DeletedRecord[]>([]);
   const [filteredRecords, setFilteredRecords] = useState<DeletedRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -69,7 +72,7 @@ const DeletedRecords: React.FC = () => {
   useEffect(() => {
     loadDeletedRecords();
     loadDropdownData();
-  }, []);
+  }, [tableMode, currentBook?.id]); // Reload when mode or book changes
 
   useEffect(() => {
     applyFilters();
@@ -268,6 +271,11 @@ const DeletedRecords: React.FC = () => {
   };
 
   const restoreRecord = async (record: DeletedRecord) => {
+    if (currentBook?.is_locked) {
+      toast.error('This book is locked. Cannot restore deleted records.');
+      return;
+    }
+
     if (!isAdmin) {
       toast.error('Only admins can restore deleted records');
       return;
@@ -505,12 +513,32 @@ const DeletedRecords: React.FC = () => {
   return (
     <div className='min-h-screen flex flex-col'>
       <div className='w-full px-4 space-y-6'>
+        {/* Locked Book Banner */}
+        {currentBook?.is_locked && (
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+            <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+            <div>
+              <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+              <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <div className='flex flex-col md:flex-row md:items-center md:justify-between gap-4'>
           <div>
-            <h1 className='text-2xl font-bold text-gray-900 flex items-center gap-2'>
+            <h1 className='text-2xl font-bold text-gray-900 flex items-center gap-2.5'>
               <Trash2 className='w-6 h-6 text-red-600' />
               Deleted Records
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+              </span>
             </h1>
             <p className='text-gray-600 mt-1'>
               View and manage deleted cash book entries
@@ -745,9 +773,9 @@ const DeletedRecords: React.FC = () => {
                               size='sm'
                               variant='secondary'
                               onClick={() => restoreRecord(record)}
-                              disabled={restoring === record.id || !isAdmin}
+                              disabled={restoring === record.id || !isAdmin || currentBook?.is_locked}
                               className='p-1 text-green-700 hover:text-green-800'
-                              title='Restore Record'
+                              title={currentBook?.is_locked ? 'Book is locked' : 'Restore Record'}
                             >
                               <RotateCcw className='w-3 h-3' />
                               <span className='sr-only'>Restore</span>

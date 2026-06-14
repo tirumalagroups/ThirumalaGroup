@@ -2,8 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import SearchableSelect from '../components/UI/SearchableSelect';
-import { supabaseDB } from '../lib/supabaseDatabase';
-import { supabase } from '../lib/supabase';
+import { supabaseDB, supabase } from '../lib/supabaseDatabase';
 import { getTableName } from '../lib/tableNames';
 import { useAuth } from '../contexts/AuthContext';
 import { useTableMode } from '../contexts/TableModeContext';
@@ -11,11 +10,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '../lib/queryClient';
 import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
+import { useBook } from '../contexts/BookContext';
 import {
   TrendingUp,
   TrendingDown,
   FileText,
   AlertCircle,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface ReplaceFormData {
@@ -30,6 +31,7 @@ interface ReplaceFormData {
 const ReplaceForm: React.FC = () => {
   const { user, isAdmin } = useAuth();
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
   const queryClient = useQueryClient();
 
   const [replaceData, setReplaceData] = useState<ReplaceFormData>({
@@ -158,7 +160,7 @@ const ReplaceForm: React.FC = () => {
     }
     loadDropdownData();
     loadEntries();
-  }, [isAdmin, tableMode]); // Reload when mode changes
+  }, [isAdmin, tableMode, currentBook?.id]); // Reload when mode or book changes
 
   useEffect(() => {
     applyFilters();
@@ -324,6 +326,11 @@ const ReplaceForm: React.FC = () => {
 
 
   const handleReplaceAccountName = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This book is locked. Replacements are disabled.');
+      return;
+    }
+
     if (!replaceData.oldAccountName || !replaceData.newAccountName) {
       toast.error('Please select both old and new account names');
       return;
@@ -465,6 +472,11 @@ const ReplaceForm: React.FC = () => {
   };
 
   const handleReplaceSubAccount = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This book is locked. Replacements are disabled.');
+      return;
+    }
+
     if (!replaceData.oldSubAccount || !replaceData.newSubAccount) {
       toast.error('Please select both old and new sub account names');
       return;
@@ -580,6 +592,11 @@ const ReplaceForm: React.FC = () => {
   };
 
   const handleReplaceCompanyName = async () => {
+    if (currentBook?.is_locked) {
+      toast.error('This book is locked. Replacements are disabled.');
+      return;
+    }
+
     if (!replaceData.oldCompanyName || !replaceData.newCompanyName) {
       toast.error('Please select both old and new company names');
       return;
@@ -697,13 +714,13 @@ const ReplaceForm: React.FC = () => {
           return;
         }
 
-        const newCompanyAccountNames = new Set((newCompanyAccounts || []).map(acc => acc.acc_name?.trim()).filter(Boolean));
+        const newCompanyAccountNames = new Set((newCompanyAccounts || []).map((acc: any) => acc.acc_name?.trim()).filter(Boolean));
         const accountsToUpdate: string[] = [];
         const accountsToDelete: string[] = [];
         const duplicateAccountNames: string[] = [];
 
         // Separate accounts into those that can be updated vs those that need to be deleted
-        (oldCompanyAccounts || []).forEach(account => {
+        (oldCompanyAccounts || []).forEach((account: any) => {
           const accName = account.acc_name?.trim();
           if (!accName) return;
 
@@ -801,7 +818,7 @@ const ReplaceForm: React.FC = () => {
 
         // Create a set of (acc_name, sub_acc) combinations for the new company
         const newCompanySubAccountKeys = new Set(
-          (newCompanySubAccounts || []).map(sub => {
+          (newCompanySubAccounts || []).map((sub: any) => {
             const accName = sub.acc_name?.trim();
             const subAcc = sub.sub_acc?.trim();
             return accName && subAcc ? `${accName}|||${subAcc}` : null;
@@ -813,7 +830,7 @@ const ReplaceForm: React.FC = () => {
         const duplicateSubAccountKeys: string[] = [];
 
         // Separate sub accounts into those that can be updated vs those that need to be deleted
-        (oldCompanySubAccounts || []).forEach(subAccount => {
+        (oldCompanySubAccounts || []).forEach((subAccount: any) => {
           const accName = subAccount.acc_name?.trim();
           const subAcc = subAccount.sub_acc?.trim();
           if (!accName || !subAcc) return;
@@ -1016,11 +1033,33 @@ const ReplaceForm: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
           <div className='flex items-center gap-3 mb-1'>
-            <h1 className='text-3xl font-bold text-gray-900'>Replace Form</h1>
+            <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+              Replace Form
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+              </span>
+            </h1>
             <ModeLabel />
           </div>
           <p className='text-gray-600'>
@@ -1096,7 +1135,8 @@ const ReplaceForm: React.FC = () => {
                   loading ||
                   replaceData.oldCompanyName.trim() === replaceData.newCompanyName.trim() ||
                   !!replaceData.oldAccountName ||
-                  !!replaceData.oldSubAccount
+                  !!replaceData.oldSubAccount ||
+                  currentBook?.is_locked
                 }
                 className='bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed'
               >
@@ -1161,7 +1201,8 @@ const ReplaceForm: React.FC = () => {
                   loading ||
                   replaceData.oldAccountName.trim() === replaceData.newAccountName.trim() ||
                   !!replaceData.oldCompanyName ||
-                  !!replaceData.oldSubAccount
+                  !!replaceData.oldSubAccount ||
+                  currentBook?.is_locked
                 }
                 className='bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed'
               >
@@ -1226,7 +1267,8 @@ const ReplaceForm: React.FC = () => {
                   loading ||
                   replaceData.oldSubAccount.trim() === replaceData.newSubAccount.trim() ||
                   !!replaceData.oldCompanyName ||
-                  !!replaceData.oldAccountName
+                  !!replaceData.oldAccountName ||
+                  currentBook?.is_locked
                 }
                 className='bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed'
               >

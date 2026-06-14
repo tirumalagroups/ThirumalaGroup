@@ -9,7 +9,7 @@ import { Toaster } from 'react-hot-toast';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { TableModeProvider } from './contexts/TableModeContext';
+import { TableModeProvider, useTableMode } from './contexts/TableModeContext';
 import { queryClient } from './lib/queryClient';
 import Layout from './components/Layout/Layout';
 import Login from './pages/Login';
@@ -31,7 +31,48 @@ import BankGuarantees from './pages/BankGuarantees';
 import Drivers from './pages/Drivers';
 import UserManagement from './pages/UserManagement';
 import CsvUpload from './pages/CsvUpload';
+import Reminders from './pages/Reminders';
 import DebugInfo from './components/UI/DebugInfo';
+import { BookProvider } from './contexts/BookContext';
+import BookManagement from './pages/BookManagement';
+import { OfflineProvider, useOffline } from './contexts/OfflineContext';
+import SyncCenter from './pages/SyncCenter';
+
+
+// Finance Mode Page Imports
+import FinanceDashboard from './pages/finance/FinanceDashboard';
+import LoanEntry from './pages/finance/LoanEntry';
+import EditLoanEntry from './pages/finance/EditLoanEntry';
+import Partners from './pages/finance/Partners';
+import SearchPage from './pages/finance/Search';
+import GeneralCalculator from './pages/finance/GeneralCalculator';
+import CapitalEntry from './pages/finance/CapitalEntry';
+import Camera from './pages/finance/Camera';
+import Daybook from './pages/finance/Daybook';
+import DailyReportFinance from './pages/finance/DailyReport';
+import GeneralLedger from './pages/finance/GeneralLedger';
+import CDLedger from './pages/finance/CDLedger';
+import STBDLedger from './pages/finance/STBDLedger';
+import HPLedger from './pages/finance/HPLedger';
+import TBDLedger from './pages/finance/TBDLedger';
+import DuesLedger from './pages/finance/DuesLedger';
+import ProfitAndLoss from './pages/finance/ProfitAndLoss';
+import FinalStatement from './pages/finance/FinalStatement';
+import BusinessReport from './pages/finance/BusinessReport';
+import PartnerPerformance from './pages/finance/PartnerPerformance';
+import NewCustomers from './pages/finance/NewCustomers';
+import PhoneNumberEditor from './pages/finance/PhoneNumberEditor';
+import AadhaarSearch from './pages/finance/AadhaarSearch';
+import EditedDeletedLogs from './pages/finance/EditedDeletedLogs';
+import UserAccessManagement from './pages/finance/UserAccessManagement';
+import OldDataEntry from './pages/finance/OldDataEntry';
+import NewCustomer from './pages/finance/NewCustomer';
+import Customers from './pages/finance/Customers';
+import NewGuarantor from './pages/finance/NewGuarantor';
+import Guarantors from './pages/finance/Guarantors';
+import NewPartner from './pages/finance/NewPartner';
+import CashBook from './pages/finance/CashBook';
+import LedgerSettings from './pages/finance/LedgerSettings';
 
 // Error Boundary Component
 class ErrorBoundary extends React.Component<
@@ -89,12 +130,36 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+// Offline Guard component to block access to unsupported routes when offline
+const OfflineGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isOnline } = useOffline();
+
+  if (!isOnline) {
+    return (
+      <div className='min-h-[60vh] bg-white border border-gray-150 rounded-2xl p-8 flex flex-col items-center justify-center text-center max-w-lg mx-auto my-12 font-outfit shadow-sm'>
+        <div className='w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-4 text-3xl'>
+          ⚠️
+        </div>
+        <h1 className='text-xl font-bold text-gray-900 mb-2'>
+          Connection Required
+        </h1>
+        <p className='text-gray-600 mb-6 text-sm max-w-xs'>
+          This feature requires an active internet connection. Please reconnect to continue.
+        </p>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+};
+
 // Main App Component - Must be inside AuthProvider
 const AppContent: React.FC = () => {
   // Protected Route Component - Must be inside AuthProvider and Router
   // Defined here to ensure it's always within the AuthProvider context
   const ProtectedRouteWrapper: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
     const { user, loading } = useAuth();
+    const { mode } = useTableMode();
 
     if (loading) {
       return (
@@ -111,13 +176,19 @@ const AppContent: React.FC = () => {
       return <Navigate to='/login' replace />;
     }
 
-    // If children provided, render them (for mode-selection page)
+    // If children provided, render them (for mode-selection/choose-mode page)
     if (children) {
       return <>{children}</>;
     }
 
+    // Direct URL protection: if no mode is selected, redirect to /choose-mode
+    if (!mode) {
+      return <Navigate to='/choose-mode' replace />;
+    }
+
     // Otherwise render Layout (for other protected routes)
-    return <Layout />;
+    // Pass active mode as key to force complete layout and component remounting
+    return <Layout key={mode} />;
   };
 
   return (
@@ -158,41 +229,115 @@ const AppContent: React.FC = () => {
           }
         />
         <Route
+          path='/choose-mode'
+          element={
+            <ProtectedRouteWrapper>
+              <ModeSelection />
+            </ProtectedRouteWrapper>
+          }
+        />
+        <Route
           path='/*'
           element={<ProtectedRouteWrapper />}
         >
           <Route index element={<Dashboard />} />
           <Route path='new-entry' element={<NewEntry />} />
           <Route path='edit-entry' element={<EditEntry />} />
-          <Route path='daily-report' element={<DailyReport />} />
-          <Route path='detailed-ledger' element={<DetailedLedger />} />
-          <Route path='ledger-summary' element={<LedgerSummary />} />
-          <Route path='approve-records' element={<ApproveRecords />} />
-          <Route path='edited-records' element={<EditedRecords />} />
-          <Route path='deleted-records' element={<DeletedRecords />} />
-          <Route path='replace-form' element={<ReplaceForm />} />
-          <Route path='balance-sheet' element={<BalanceSheet />} />
-          <Route path='export-excel' element={<ExportExcel />} />
+          <Route path='sync-center' element={<SyncCenter />} />
           <Route path='vehicles' element={<Vehicles />} />
-          <Route path='bank-guarantees' element={<BankGuarantees />} />
-          <Route path='drivers' element={<Drivers />} />
+          <Route path='reminders' element={<Reminders />} />
           <Route path='user-management' element={<UserManagement />} />
-          <Route path='csv-upload' element={<CsvUpload />} />
+          <Route path='book-management' element={<BookManagement />} />
+          
+          {/* Guarded Routes requiring connection */}
+          <Route path='daily-report' element={<OfflineGuard><DailyReport /></OfflineGuard>} />
+          <Route path='detailed-ledger' element={<OfflineGuard><DetailedLedger /></OfflineGuard>} />
+          <Route path='ledger-summary' element={<OfflineGuard><LedgerSummary /></OfflineGuard>} />
+          <Route path='approve-records' element={<OfflineGuard><ApproveRecords /></OfflineGuard>} />
+          <Route path='edited-records' element={<OfflineGuard><EditedRecords /></OfflineGuard>} />
+          <Route path='deleted-records' element={<OfflineGuard><DeletedRecords /></OfflineGuard>} />
+          <Route path='replace-form' element={<OfflineGuard><ReplaceForm /></OfflineGuard>} />
+          <Route path='balance-sheet' element={<OfflineGuard><BalanceSheet /></OfflineGuard>} />
+          <Route path='export-excel' element={<OfflineGuard><ExportExcel /></OfflineGuard>} />
+          <Route path='bank-guarantees' element={<OfflineGuard><BankGuarantees /></OfflineGuard>} />
+          <Route path='drivers' element={<OfflineGuard><Drivers /></OfflineGuard>} />
+          <Route path='csv-upload' element={<OfflineGuard><CsvUpload /></OfflineGuard>} />
+
+          {/* Finance Mode Routes (All Guarded Offline) */}
+          <Route path='finance' element={<OfflineGuard><FinanceDashboard /></OfflineGuard>} />
+          <Route path='finance/loan-entry' element={<OfflineGuard><LoanEntry /></OfflineGuard>} />
+          <Route path='finance/edit-loan-entry' element={<OfflineGuard><EditLoanEntry /></OfflineGuard>} />
+          <Route path='finance/partners' element={<OfflineGuard><Partners /></OfflineGuard>} />
+          <Route path='finance/search' element={<OfflineGuard><SearchPage /></OfflineGuard>} />
+          <Route path='finance/calculator' element={<OfflineGuard><GeneralCalculator /></OfflineGuard>} />
+          <Route path='finance/capital-entry' element={<OfflineGuard><CapitalEntry /></OfflineGuard>} />
+          <Route path='finance/camera' element={<OfflineGuard><Camera /></OfflineGuard>} />
+          <Route path='finance/daybook' element={<OfflineGuard><Daybook /></OfflineGuard>} />
+          <Route path='finance/daily-report' element={<OfflineGuard><DailyReportFinance /></OfflineGuard>} />
+          <Route path='finance/general-ledger' element={<OfflineGuard><GeneralLedger /></OfflineGuard>} />
+          <Route path='finance/cd-ledger' element={<OfflineGuard><CDLedger /></OfflineGuard>} />
+          <Route path='finance/stbd-ledger' element={<OfflineGuard><STBDLedger /></OfflineGuard>} />
+          <Route path='finance/hp-ledger' element={<OfflineGuard><HPLedger /></OfflineGuard>} />
+          <Route path='finance/tbd-ledger' element={<OfflineGuard><TBDLedger /></OfflineGuard>} />
+          <Route path='finance/dues-ledger' element={<OfflineGuard><DuesLedger /></OfflineGuard>} />
+          <Route path='finance/pl' element={<OfflineGuard><ProfitAndLoss /></OfflineGuard>} />
+          <Route path='finance/final-statement' element={<OfflineGuard><FinalStatement /></OfflineGuard>} />
+          <Route path='finance/business-report' element={<OfflineGuard><BusinessReport /></OfflineGuard>} />
+          <Route path='finance/partner-performance' element={<OfflineGuard><PartnerPerformance /></OfflineGuard>} />
+          <Route path='finance/new-customers' element={<OfflineGuard><NewCustomers /></OfflineGuard>} />
+          <Route path='finance/phone-editor' element={<OfflineGuard><PhoneNumberEditor /></OfflineGuard>} />
+          <Route path='finance/aadhaar-search' element={<OfflineGuard><AadhaarSearch /></OfflineGuard>} />
+          <Route path='finance/logs' element={<OfflineGuard><EditedDeletedLogs /></OfflineGuard>} />
+          <Route path='finance/user-access-management' element={<OfflineGuard><UserAccessManagement /></OfflineGuard>} />
+          <Route path='finance/old-data-entry' element={<OfflineGuard><OldDataEntry /></OfflineGuard>} />
+          <Route path='finance/new-customer' element={<OfflineGuard><NewCustomer /></OfflineGuard>} />
+          <Route path='finance/customers' element={<OfflineGuard><Customers /></OfflineGuard>} />
+          <Route path='finance/new-guarantor' element={<OfflineGuard><NewGuarantor /></OfflineGuard>} />
+          <Route path='finance/guarantors' element={<OfflineGuard><Guarantors /></OfflineGuard>} />
+          <Route path='finance/new-partner' element={<OfflineGuard><NewPartner /></OfflineGuard>} />
+          <Route path='finance/cash-book' element={<OfflineGuard><CashBook /></OfflineGuard>} />
+          <Route path='finance/ledger-settings' element={<OfflineGuard><LedgerSettings /></OfflineGuard>} />
         </Route>
       </Routes>
     </Router>
   );
 };
 
-// Root App Component with Error Boundary
+import { setupAudioUnlock } from './utils/reminderSound';
+
 const App: React.FC = () => {
+  React.useEffect(() => {
+    // Enable browser AudioContext unlock on first user interaction
+    setupAudioUnlock();
+
+    const handleWheel = () => {
+      const activeElement = document.activeElement;
+      if (
+        activeElement &&
+        activeElement.tagName === 'INPUT' &&
+        (activeElement as HTMLInputElement).type === 'number'
+      ) {
+        (activeElement as HTMLInputElement).blur();
+      }
+    };
+
+    document.addEventListener('wheel', handleWheel, { passive: true });
+    return () => {
+      document.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
+
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <TableModeProvider>
-            <AppContent />
-            <DebugInfo isVisible={false} />
+            <BookProvider>
+              <OfflineProvider>
+                <AppContent />
+                <DebugInfo isVisible={false} />
+              </OfflineProvider>
+            </BookProvider>
             {/* React Query DevTools - only in development */}
             {process.env.NODE_ENV === 'development' && (
               <ReactQueryDevtools initialIsOpen={false} />

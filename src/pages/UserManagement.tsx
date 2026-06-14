@@ -68,40 +68,7 @@ const mapFeaturesByMode = (featuresByMode: Record<ModeKey, string[]>) =>
     mode,
     features: normalizeFeatures(featuresByMode?.[mode] || []),
   }));
-type ModeBadgeVariant = 'summary' | 'detail';
-const renderModeBadge = (
-  modeKey: ModeKey,
-  count: number,
-  variant: ModeBadgeVariant
-) => {
-  const Icon = modeKey === 'itr' ? FileCheck : Briefcase;
-  const label =
-    variant === 'summary'
-      ? modeKey === 'itr'
-        ? 'ITR'
-        : 'Regular'
-      : modeKey === 'itr'
-      ? 'ITR Access'
-      : 'Regular Access';
-  const hasAccess = count > 0;
-  const colorClasses = hasAccess
-    ? MODE_BADGES[modeKey].badge
-    : 'bg-gray-50 text-gray-400 border-gray-200';
-  const padding =
-    variant === 'summary' ? 'px-2 py-0.5 text-xs' : 'px-3 py-1.5 text-xs';
 
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full border font-semibold ${padding} ${colorClasses}`}
-    >
-      <Icon className='w-3 h-3' />
-      {label}
-      {hasAccess && (
-        <span className='text-[10px] font-bold ml-1'>{count}</span>
-      )}
-    </span>
-  );
-};
 
 interface Feature {
   key: string;
@@ -142,7 +109,8 @@ interface NewUserFormState {
 
 const UserManagement: React.FC = () => {
   const { user } = useAuth();
-  const { mode: currentMode } = useTableMode();
+  const { mode: rawMode } = useTableMode();
+  const currentMode: ModeKey = rawMode === 'itr' ? 'itr' : 'regular';
   const [users, setUsers] = useState<UserRow[]>([]);
   const [features, setFeatures] = useState<Feature[]>([]);
   const [newUser, setNewUser] = useState<NewUserFormState>(() => ({
@@ -210,6 +178,60 @@ useEffect(() => {
   }, [newUser]);
 
   const loadUsers = async () => {
+    // Migration: Enable delete_entry by default for existing users who have edit_entry
+    try {
+      const { data: featRecord } = await supabase
+        .from('features')
+        .select('key')
+        .eq('key', 'delete_entry')
+        .maybeSingle();
+      
+      if (!featRecord) {
+        console.log('🔄 First-time run: Migrating delete_entry features for existing users...');
+        const supportsMode = await ensureUserAccessModeSupport();
+        
+        let query = supabase.from('user_access').select('user_id, feature_key' + (supportsMode ? ', mode' : ''));
+        const { data: allAccess } = await query as any;
+        
+        if (allAccess) {
+          const editAccessRows = allAccess.filter((row: any) => row.feature_key === 'edit_entry');
+          const deleteAccessRows = allAccess.filter((row: any) => row.feature_key === 'delete_entry');
+          
+          const insertsToMake: any[] = [];
+          
+          for (const editRow of editAccessRows) {
+            const hasDelete = deleteAccessRows.some(
+              (delRow: any) => delRow.user_id === editRow.user_id && (!supportsMode || delRow.mode === editRow.mode)
+            );
+            if (!hasDelete) {
+              const payload: any = {
+                user_id: editRow.user_id,
+                feature_key: 'delete_entry'
+              };
+              if (supportsMode) {
+                payload.mode = editRow.mode || 'regular';
+              }
+              insertsToMake.push(payload);
+            }
+          }
+          
+          if (insertsToMake.length > 0) {
+            console.log(`Inserting ${insertsToMake.length} delete_entry records...`, insertsToMake);
+            await supabase.from('user_access').insert(insertsToMake);
+          }
+        }
+        
+        // Ensure delete_entry exists in features table to flag migration as done
+        await supabase.from('features').upsert({
+          key: 'delete_entry',
+          name: 'Delete Entry'
+        }, { onConflict: 'key' });
+        console.log('✅ delete_entry migration finished');
+      }
+    } catch (migError) {
+      console.error('Error running delete_entry migration:', migError);
+    }
+
     // Try to select mode column - if it doesn't exist, we'll handle it
     let userRows: any[] = [];
     let hasModeColumn = true;
@@ -401,7 +423,7 @@ const upsertUserAccess = async (
 
   return result;
 };
-  const applyModeFilter = <T,>(builder: any, supportsMode: boolean, modeOverride?: ModeKey) => {
+  const applyModeFilter = (builder: any, supportsMode: boolean, modeOverride?: ModeKey) => {
     if (supportsMode) {
       return builder.eq('mode', modeOverride ?? currentMode);
     }
@@ -414,6 +436,7 @@ const upsertUserAccess = async (
       { key: 'dashboard', name: 'Dashboard' },
       { key: 'new_entry', name: 'New Entry' },
       { key: 'edit_entry', name: 'Edit Entry' },
+      { key: 'delete_entry', name: 'Delete Entry' },
       { key: 'daily_report', name: 'Daily Report' },
       { key: 'detailed_ledger', name: 'Detailed Ledger' },
       { key: 'ledger_summary', name: 'Ledger Summary' },
@@ -425,126 +448,14 @@ const upsertUserAccess = async (
       { key: 'csv_upload', name: 'CSV Upload' },
       { key: 'balance_sheet', name: 'Balance Sheet' },
       { key: 'vehicles', name: 'Vehicles' },
+      { key: 'reminders', name: 'Reminders' },
+      { key: 'sync_center', name: 'Sync Center' },
       { key: 'bank_guarantees', name: 'Bank Guarantees' },
       { key: 'drivers', name: 'Drivers' },
+      { key: 'book_management', name: 'Book Management' },
     ];
     console.log('📋 Loading features:', defaultFeatures.length, 'features:', defaultFeatures.map(f => f.name).join(', '));
     setFeatures(defaultFeatures);
-  };
-
-  const handleAddUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newUser.username || !newUser.password) {
-      toast.error('Username and password required');
-      return;
-    }
-    setLoading(true);
-    try {
-      const password_hash = await bcrypt.hash(newUser.password, 10);
-
-      // Get the appropriate user type ID
-      const userType = newUser.is_admin ? 'Admin' : 'Operator';
-      const { data: userTypeData } = await supabase
-        .from('user_types')
-        .select('id')
-        .eq('user_type', userType)
-        .single();
-
-      if (!userTypeData) {
-        throw new Error('User type not found');
-      }
-
-      // Try to insert with mode first
-      let insertData: any = {
-        username: newUser.username,
-        password_hash,
-        user_type_id: userTypeData.id,
-        email: `${newUser.username}@thirumala.com`,
-        mode: newUser.mode,
-      };
-
-      let createdUser: any = null;
-      let modeColumnExists = true;
-
-      const { data: userData, error } = await supabase
-        .from('users')
-        .insert(insertData)
-        .select()
-        .single();
-      
-      if (error) {
-        // Check if error is specifically about the mode column
-        const isModeError = error.message?.includes('mode') || 
-                           error.message?.includes('column "mode"') ||
-                           error.code === '42703' || 
-                           error.code === 'PGRST116' ||
-                           error.message?.toLowerCase().includes('does not exist');
-        
-        if (isModeError) {
-          console.log('Mode column does not exist, creating user without mode...');
-          modeColumnExists = false;
-          delete insertData.mode;
-          
-          const { data: retryUser, error: retryError } = await supabase
-            .from('users')
-            .insert(insertData)
-            .select()
-            .single();
-          
-          if (retryError) throw retryError;
-          
-          createdUser = retryUser;
-          
-          // Only show error if mode column truly doesn't exist
-          if (!modeColumnExists) {
-            toast.error('User created, but mode column does not exist. Please add it to the database using: ALTER TABLE users ADD COLUMN mode TEXT CHECK (mode IN (\'regular\', \'itr\'));', { duration: 10000 });
-          }
-          
-          setNewUser({
-            username: '',
-            password: '',
-            is_admin: false,
-            featuresByMode: emptyModeFeatures(),
-            mode: currentMode,
-            address: '',
-            aadhaar_number: '',
-            phone: '',
-            email: '',
-            full_name: '',
-            date_of_birth: '',
-            other_details: '',
-          });
-          loadUsers();
-          setLoading(false);
-          return;
-        }
-        throw error;
-      } else {
-        createdUser = userData;
-        modeColumnExists = true;
-      }
-
-      // For now, skip feature access since we're using a simplified approach
-      toast.success('User created!');
-      setNewUser({
-        username: '',
-        password: '',
-        is_admin: false,
-        featuresByMode: emptyModeFeatures(),
-        mode: currentMode,
-        address: '',
-        aadhaar_number: '',
-        phone: '',
-        email: '',
-        full_name: '',
-        date_of_birth: '',
-        other_details: '',
-      });
-      loadUsers();
-    } catch (err: any) {
-      toast.error(err.message || 'Error creating user');
-    }
-    setLoading(false);
   };
 
   const handleDeleteUser = async (id: string) => {
@@ -552,15 +463,6 @@ const upsertUserAccess = async (
     await supabase.from('users').delete().eq('id', id);
     toast.success('User deleted');
     loadUsers();
-  };
-
-  const handleFeatureChange = async (
-    userId: string,
-    featureKey: string,
-    hasAccess: boolean
-  ) => {
-    // Feature management disabled for now - simplified approach
-    console.log('Feature management not implemented yet');
   };
 
   const handleModalChange = (field: string, value: any) => {
@@ -572,9 +474,16 @@ const upsertUserAccess = async (
     setNewUser(prev => {
       const currentFeaturesByMode = prev.featuresByMode || emptyModeFeatures();
       const currentFeatures = currentFeaturesByMode?.[modeKey] || [];
-      const updatedFeatures = currentFeatures.includes(featureKey)
+      let updatedFeatures = currentFeatures.includes(featureKey)
         ? currentFeatures.filter(f => f !== featureKey)
         : [...currentFeatures, featureKey];
+
+      // Auto-toggle delete_entry ON if edit_entry is toggled ON
+      if (featureKey === 'edit_entry' && !currentFeatures.includes('edit_entry')) {
+        if (!updatedFeatures.includes('delete_entry')) {
+          updatedFeatures.push('delete_entry');
+        }
+      }
 
       const updatedFeaturesByMode = {
         ...currentFeaturesByMode,
@@ -592,9 +501,16 @@ const upsertUserAccess = async (
     console.log('🔄 Toggling edit feature:', featureKey, 'for mode:', modeKey);
     setEditFeaturesByMode(prev => {
       const currentFeatures = prev?.[modeKey] || [];
-      const updatedFeatures = currentFeatures.includes(featureKey)
+      let updatedFeatures = currentFeatures.includes(featureKey)
         ? currentFeatures.filter(f => f !== featureKey)
         : [...currentFeatures, featureKey];
+
+      // Auto-toggle delete_entry ON if edit_entry is toggled ON
+      if (featureKey === 'edit_entry' && !currentFeatures.includes('edit_entry')) {
+        if (!updatedFeatures.includes('delete_entry')) {
+          updatedFeatures.push('delete_entry');
+        }
+      }
 
       return {
         ...prev,
@@ -643,7 +559,6 @@ const upsertUserAccess = async (
 
       let createdUser: any = null;
       let finalUser: any = null;
-      let modeColumnExists = true;
       
       // First, try to insert with mode
       const { data: userData, error } = await supabase
@@ -713,9 +628,7 @@ const upsertUserAccess = async (
             cleanInsertData.other_details = insertData.other_details;
           }
           
-          if (isModeError) {
-            modeColumnExists = false;
-          }
+
           
           const { data: retryUser, error: retryError } = await supabase
             .from('users')
@@ -797,7 +710,6 @@ const upsertUserAccess = async (
         createdUser = userData;
         finalUser = userData;
         // User created successfully with mode - column exists!
-        modeColumnExists = true;
       }
 
       if (!createdUser || !createdUser.id || !finalUser || !finalUser.id) {
@@ -842,8 +754,6 @@ const upsertUserAccess = async (
       // Additional wait to ensure database has fully committed the user
       console.log('⏳ Waiting for database to fully commit user...');
       await new Promise(resolve => setTimeout(resolve, 500));
-
-      const supportsUserAccessMode = await ensureUserAccessModeSupport();
 
       const newUserFeatureSets = mapFeaturesByMode(newUser.featuresByMode);
       const totalSelectedFeatures = newUserFeatureSets.reduce(
@@ -1435,9 +1345,7 @@ const upsertUserAccess = async (
                 Admins ({users.filter(u => u.is_admin).length})
               </h2>
               <div className='flex flex-col gap-6'>
-                {users.filter(u => u.is_admin).map((u, adminIndex) => {
-                  const regularFeatureCount = u.featuresByMode?.regular?.length || 0;
-                  const itrFeatureCount = u.featuresByMode?.itr?.length || 0;
+                {users.filter(u => u.is_admin).map(u => {
 
                   return (
             <div
@@ -1787,7 +1695,7 @@ const upsertUserAccess = async (
                               // Load features by mode from user's current access
                               // Ensure both regular and itr keys exist by merging with emptyModeFeatures
                               const baseFeatures = emptyModeFeatures();
-                              const userFeatures = u.featuresByMode || {};
+                              const userFeatures = u.featuresByMode || emptyModeFeatures();
                               // Ensure both keys exist and are arrays
                               const featuresByMode: Record<ModeKey, string[]> = {
                                 regular: Array.isArray(userFeatures.regular) ? userFeatures.regular : baseFeatures.regular,
@@ -1940,8 +1848,6 @@ const upsertUserAccess = async (
               </h2>
               <div className='flex flex-col gap-6'>
                 {users.filter(u => !u.is_admin).map(u => {
-                  const regularFeatureCount = u.featuresByMode?.regular?.length || 0;
-                  const itrFeatureCount = u.featuresByMode?.itr?.length || 0;
 
                   return (
             <div
@@ -2291,7 +2197,7 @@ const upsertUserAccess = async (
                               // Load features by mode from user's current access
                               // Ensure both regular and itr keys exist by merging with emptyModeFeatures
                               const baseFeatures = emptyModeFeatures();
-                              const userFeatures = u.featuresByMode || {};
+                              const userFeatures = u.featuresByMode || emptyModeFeatures();
                               // Ensure both keys exist and are arrays
                               const featuresByMode: Record<ModeKey, string[]> = {
                                 regular: Array.isArray(userFeatures.regular) ? userFeatures.regular : baseFeatures.regular,

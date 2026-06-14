@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
@@ -9,6 +10,7 @@ import ModeLabel from '../components/UI/ModeLabel';
 import { format, differenceInDays } from 'date-fns';
 import { BankGuarantee } from '../lib/supabaseDatabase';
 import { supabaseDB } from '../lib/supabaseDatabase';
+import { useBook } from '../contexts/BookContext';
 import {
   CreditCard,
   AlertTriangle,
@@ -22,11 +24,42 @@ import {
 
 const BankGuarantees: React.FC = () => {
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
   const [bankGuarantees, setBankGuarantees] = useState<BankGuarantee[]>([]);
   const [filteredBGs, setFilteredBGs] = useState<BankGuarantee[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingBG, setEditingBG] = useState<BankGuarantee | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const location = useLocation();
+  const queryParams = new URLSearchParams(location.search);
+  const highlightExpiring = queryParams.get('highlightExpiring') === 'true' || location.state?.highlightExpiring;
+
+  const [isHighlightActive, setIsHighlightActive] = useState(false);
+
+  useEffect(() => {
+    if (highlightExpiring && bankGuarantees.length > 0) {
+      setIsHighlightActive(true);
+      const timer = setTimeout(() => {
+        setIsHighlightActive(false);
+      }, 5000); // 5 seconds highlight
+
+      const scrollTimer = setTimeout(() => {
+        const firstExpiringBG = bankGuarantees.find(bg => !bg.cancelled && (getExpiryStatus(bg.exp_date).status === 'expired' || getExpiryStatus(bg.exp_date).status === 'expiring'));
+        if (firstExpiringBG) {
+          const element = document.getElementById(`bg-row-${firstExpiringBG.id}`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }
+      }, 300);
+
+      return () => {
+        clearTimeout(timer);
+        clearTimeout(scrollTimer);
+      };
+    }
+  }, [bankGuarantees, highlightExpiring]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedBG, setSelectedBG] = useState<BankGuarantee | null>(null);
   const [showDetails, setShowDetails] = useState(false);
@@ -65,7 +98,7 @@ const BankGuarantees: React.FC = () => {
   useEffect(() => {
     loadBankGuarantees();
     loadCustomDepartments();
-  }, [tableMode]);
+  }, [tableMode, currentBook?.id]);
 
   useEffect(() => {
     applyFilters();
@@ -173,6 +206,17 @@ const BankGuarantees: React.FC = () => {
       });
     }
 
+    // If highlightExpiring is true, sort expiring/expired active BGs to the top
+    if (highlightExpiring) {
+      filtered.sort((a, b) => {
+        const aStatus = !a.cancelled && (getExpiryStatus(a.exp_date).status === 'expired' || getExpiryStatus(a.exp_date).status === 'expiring');
+        const bStatus = !b.cancelled && (getExpiryStatus(b.exp_date).status === 'expired' || getExpiryStatus(b.exp_date).status === 'expiring');
+        if (aStatus && !bStatus) return -1;
+        if (!aStatus && bStatus) return 1;
+        return 0;
+      });
+    }
+
     setFilteredBGs(filtered);
   };
 
@@ -242,6 +286,10 @@ const BankGuarantees: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     setLoading(true);
 
     try {
@@ -288,19 +336,40 @@ const BankGuarantees: React.FC = () => {
   };
 
   const handleEdit = (bg: BankGuarantee) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     setEditingBG({ ...bg });
     setShowAddForm(false);
   };
 
-  const handleCancel = (bgId: string) => {
+  const handleCancel = async (bgId: string) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     if (
       window.confirm('Are you sure you want to cancel this Bank Guarantee?')
     ) {
-      const updatedBGs = bankGuarantees.map(bg =>
-        bg.id === bgId ? { ...bg, cancelled: true } : bg
-      );
-      setBankGuarantees(updatedBGs);
-      toast.success('Bank Guarantee cancelled successfully!');
+      setLoading(true);
+      try {
+        const bg = bankGuarantees.find(item => item.id === bgId);
+        if (bg) {
+          const success = await supabaseDB.updateBankGuarantee(bgId, { ...bg, cancelled: true });
+          if (success) {
+            toast.success('Bank Guarantee cancelled successfully!');
+            await loadBankGuarantees();
+          } else {
+            toast.error('Failed to cancel Bank Guarantee');
+          }
+        }
+      } catch (error) {
+        console.error('Error cancelling bank guarantee:', error);
+        toast.error('Error cancelling bank guarantee');
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
@@ -362,11 +431,33 @@ const BankGuarantees: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print mb-6">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
           <div className='flex items-center gap-3 mb-1'>
-            <h1 className='text-3xl font-bold text-gray-900'>Bank Guarantees</h1>
+            <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+              Bank Guarantees
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+              </span>
+            </h1>
             <ModeLabel />
           </div>
           <p className='text-gray-600'>
@@ -380,14 +471,16 @@ const BankGuarantees: React.FC = () => {
           <Button variant='secondary' onClick={exportToExcel}>
             Export
           </Button>
-          <Button
-            onClick={() => {
-              setShowAddForm(!showAddForm);
-              setEditingBG(null);
-            }}
-          >
-            Add BG
-          </Button>
+          {!currentBook?.is_locked && (
+            <Button
+              onClick={() => {
+                setShowAddForm(!showAddForm);
+                setEditingBG(null);
+              }}
+            >
+              Add BG
+            </Button>
+          )}
         </div>
       </div>
 
@@ -749,17 +842,33 @@ const BankGuarantees: React.FC = () => {
               <tbody>
                 {filteredBGs.map((bg, index) => {
                   const expiryStatus = getExpiryStatus(bg.exp_date);
+                  const isExpiringSoon = !bg.cancelled && (expiryStatus.status === 'expired' || expiryStatus.status === 'expiring');
+                  const isHighlighted = isHighlightActive && isExpiringSoon;
+
+                  let rowBg = index % 2 === 0 ? 'bg-white' : 'bg-gray-25';
+                  let borderClass = 'border-b border-gray-100';
+
+                  if (isHighlighted) {
+                    rowBg = 'bg-[#FEF3C7] hover:bg-[#FEF3C7]';
+                    borderClass = 'border-2 border-[#F59E0B]';
+                  }
 
                   return (
                     <tr
                       key={bg.id}
-                      className={`border-b hover:bg-gray-50 transition-colors ${
-                        index % 2 === 0 ? 'bg-white' : 'bg-gray-25'
-                      } ${bg.cancelled ? 'opacity-60' : ''}`}
+                      id={`bg-row-${bg.id}`}
+                      className={`hover:bg-gray-50 transition-all duration-1000 ${borderClass} ${rowBg} ${bg.cancelled ? 'opacity-60' : ''}`}
                     >
                       <td className='px-3 py-2 font-medium'>{bg.sno}</td>
                       <td className='px-3 py-2 font-medium text-blue-600'>
-                        {bg.bg_no}
+                        <div className="flex items-center gap-2">
+                          {bg.bg_no}
+                          {isHighlighted && (
+                            <span className='inline-flex items-center text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300 animate-pulse'>
+                              🔔 Opened From Dashboard
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className='px-3 py-2 text-center'>
                         {format(new Date(bg.issue_date), 'dd-MM-yyyy')}
@@ -807,7 +916,7 @@ const BankGuarantees: React.FC = () => {
                           >
                             View
                           </Button>
-                          {!bg.cancelled && (
+                          {!bg.cancelled && !currentBook?.is_locked && (
                             <>
                               <Button
                                 size='sm'

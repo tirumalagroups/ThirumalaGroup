@@ -15,8 +15,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-// Create Supabase client with error handling and CORS configuration
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+// Create raw Supabase client
+const rawSupabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
@@ -29,6 +29,79 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
   db: {
     schema: 'public',
+  },
+});
+
+// Shared tables that must remain in the public schema
+const SHARED_TABLES = [
+  'users',
+  'user_types',
+  'user_access',
+  'user_permissions',
+  'user_credentials_log',
+  'login_attempts',
+  'login_activities',
+  'features',
+  'audit_logs',
+  'notification_settings',
+];
+
+// Helper to get table mode from storage
+const getTableMode = (): 'regular' | 'itr' | 'finance' => {
+  if (typeof window === 'undefined') return 'regular';
+  const saved = sessionStorage.getItem('table_mode') || localStorage.getItem('table_mode');
+  if (saved === 'itr' || saved === 'finance' || saved === 'regular') {
+    return saved as 'regular' | 'itr' | 'finance';
+  }
+  return 'regular';
+};
+
+// Resolver for schema and table name
+export function resolveSchemaAndTable(tableName: string): { schema: string; table: string } {
+  // If it's a shared table, keep it in public schema
+  if (SHARED_TABLES.includes(tableName)) {
+    return { schema: 'public', table: tableName };
+  }
+
+  // Check if it's a finance table
+  if (tableName.startsWith('finance_')) {
+    let base = tableName.substring(8); // remove 'finance_'
+    if (base === 'customers') {
+      base = 'borrowers';
+    } else if (base === 'transactions') {
+      base = 'loan_transactions';
+    } else if (base === 'dues') {
+      base = 'due_entries';
+    } else if (base === 'user_permissions') {
+      return { schema: 'public', table: 'user_permissions' };
+    }
+    return { schema: 'finance', table: base };
+  }
+
+  // Otherwise, it's a regular/itr table
+  // Clean the table name (remove _itr suffix if present)
+  let baseTable = tableName;
+  if (tableName.endsWith('_itr')) {
+    baseTable = tableName.substring(0, tableName.length - 4);
+  }
+
+  // Resolve schema based on active mode
+  const currentMode = getTableMode();
+  const schema = currentMode === 'itr' ? 'itr' : currentMode === 'finance' ? 'finance' : 'regular';
+  
+  return { schema, table: baseTable };
+}
+
+// Proxied supabase client wrapper
+export const supabase = new Proxy(rawSupabase, {
+  get(target, prop, receiver) {
+    if (prop === 'from') {
+      return (tableName: string) => {
+        const { schema, table } = resolveSchemaAndTable(tableName);
+        return target.schema(schema).from(table);
+      };
+    }
+    return Reflect.get(target, prop, receiver);
   },
 });
 

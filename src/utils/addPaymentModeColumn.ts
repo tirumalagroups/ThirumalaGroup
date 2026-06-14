@@ -16,31 +16,28 @@ export async function checkPaymentModeColumnExists(): Promise<{
   message: string;
 }> {
   try {
-    // Try to select payment_mode from cash_book - if it fails, column doesn't exist
-    const { error, data } = await supabase
+    // Try to select payment_mode from cash_book - if it fails with 42703, column doesn't exist
+    const { error } = await supabase
       .from(getTableName('cash_book'))
       .select('payment_mode')
       .limit(1);
 
     if (error) {
-      // Check if error is because column doesn't exist (PostgreSQL error code 42703)
-      if (
-        error.code === '42703' ||
-        error.message?.includes('payment_mode') ||
-        error.message?.includes('column') ||
-        error.message?.includes('does not exist')
-      ) {
+      // ONLY treat PostgreSQL error code 42703 (undefined_column) as "column missing".
+      // Any other error (RLS, network, auth) should NOT show the banner —
+      // the column probably exists but we just can't read it right now.
+      if (error.code === '42703') {
         return {
           exists: false,
           error: error.message,
           message: 'payment_mode column does not exist in cash_book table',
         };
       }
-      // Some other error
+      // Some other error (RLS, network, auth) — assume column exists to avoid false banner
+      console.warn('payment_mode check got non-42703 error (treating as exists):', error.code, error.message);
       return {
-        exists: false,
-        error: error.message,
-        message: `Error checking column: ${error.message}`,
+        exists: true,
+        message: `Could not verify column (non-schema error): ${error.message}`,
       };
     }
 
@@ -50,10 +47,12 @@ export async function checkPaymentModeColumnExists(): Promise<{
       message: 'payment_mode column exists ✓',
     };
   } catch (err: any) {
+    // Network / unknown exception — assume exists to avoid false banner
+    console.warn('payment_mode check threw exception (treating as exists):', err.message || String(err));
     return {
-      exists: false,
+      exists: true,
       error: err.message || String(err),
-      message: `Exception while checking column: ${err.message || String(err)}`,
+      message: `Exception while checking column (treating as exists): ${err.message || String(err)}`,
     };
   }
 }

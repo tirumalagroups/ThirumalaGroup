@@ -9,7 +9,9 @@ import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import CustomCalendar from '../components/UI/CustomCalendar';
 import { format } from 'date-fns';
-import { TrendingUp, TrendingDown, Search, BarChart3, Plus, Database, RefreshCw, Calendar } from 'lucide-react';
+import { getSharedPrintStyles } from '../utils/print';
+import { TrendingUp, TrendingDown, Search, BarChart3, Plus, Database, RefreshCw, Calendar, AlertTriangle } from 'lucide-react';
+import { useBook } from '../contexts/BookContext';
 
 interface DetailedLedgerFilters {
   fromDate: string;
@@ -108,6 +110,7 @@ const matchDetailedLedgerSearchTerm = (entry: LedgerEntry, searchTerm: string): 
 const DetailedLedger: React.FC = () => {
   const { user } = useAuth();
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
   const [allLedgerEntries, setAllLedgerEntries] = useState<LedgerEntry[]>([]);
 
   const [filters, setFilters] = useState<DetailedLedgerFilters>({
@@ -244,7 +247,7 @@ const DetailedLedger: React.FC = () => {
 
   useEffect(() => {
     loadLedgerData();
-  }, [tableMode]);
+  }, [tableMode, currentBook?.id]);
 
   useEffect(() => {
     applyFilters();
@@ -739,35 +742,35 @@ const DetailedLedger: React.FC = () => {
     entriesToPrint.forEach((entry, index) => {
       allRows += `
         <tr>
-            <td style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${index + 1}</td>
-            <td style="padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${format(new Date(entry.date), 'dd/MM/yyyy')}</td>
-            <td style="padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1;">${entry.companyName}</td>
-            <td style="padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.accountName}</td>
-            <td style="padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.subAccount || '-'}</td>
-            <td style="padding: 2px 1px; border: 1px solid #000; font-size: 11px; word-wrap: break-word; line-height: 1.1; font-weight: bold;">${entry.particulars}</td>
-            <td style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.purchaseQuantity > 0 ? entry.purchaseQuantity.toLocaleString() : '-'}</td>
-            <td style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.saleQuantity > 0 ? entry.saleQuantity.toLocaleString() : '-'}</td>
-            <td style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
-            <td style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
+            <td class="col-sno text-center">${index + 1}</td>
+            <td class="col-date">${format(new Date(entry.date), 'dd/MM/yyyy')}</td>
+            <td class="col-company">${entry.companyName}</td>
+            <td class="col-account">${entry.accountName}</td>
+            <td class="col-sub-account">${entry.subAccount || '-'}</td>
+            <td class="col-particulars">${entry.particulars}</td>
+            <td class="col-purchase-qty">${entry.purchaseQuantity > 0 ? entry.purchaseQuantity.toLocaleString() : '-'}</td>
+            <td class="col-sale-qty">${entry.saleQuantity > 0 ? entry.saleQuantity.toLocaleString() : '-'}</td>
+            <td class="col-credit">${entry.credit > 0 ? `${entry.credit.toLocaleString()}` : '-'}</td>
+            <td class="col-debit">${entry.debit > 0 ? `${entry.debit.toLocaleString()}` : '-'}</td>
         </tr>
       `;
     });
 
     const totalsRow = `
       <tr style="background-color: #f0f0f0; font-weight: bold;">
-          <td colspan="6" style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">TOTAL:</td>
-          <td style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${printTotals.totalPurchaseQty > 0 ? printTotals.totalPurchaseQty.toLocaleString() : '-'}</td>
-          <td style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; line-height: 1.1; font-weight: bold;">${printTotals.totalSaleQty > 0 ? printTotals.totalSaleQty.toLocaleString() : '-'}</td>
-          <td style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1;">${printTotals.totalCredit.toLocaleString()}</td>
-          <td style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1;">${printTotals.totalDebit.toLocaleString()}</td>
+          <td colspan="6" class="text-right">TOTAL:</td>
+          <td class="col-purchase-qty">${printTotals.totalPurchaseQty > 0 ? printTotals.totalPurchaseQty.toLocaleString() : '-'}</td>
+          <td class="col-sale-qty">${printTotals.totalSaleQty > 0 ? printTotals.totalSaleQty.toLocaleString() : '-'}</td>
+          <td class="col-credit">${printTotals.totalCredit.toLocaleString()}</td>
+          <td class="col-debit">${printTotals.totalDebit.toLocaleString()}</td>
         </tr>
         <tr style="background-color: #e8e8e8;">
-          <td colspan="6" style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1;">QUANTITY BALANCE:</td>
-          <td colspan="1" style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1; color: ${printTotals.quantityBalance >= 0 ? '#059669' : '#dc2626'};">
+          <td colspan="6" class="text-right">QUANTITY BALANCE:</td>
+          <td colspan="1" class="col-purchase-qty" style="color: ${printTotals.quantityBalance >= 0 ? '#059669' : '#dc2626'};">
 ${printTotals.quantityBalance > 0 ? printTotals.quantityBalance.toLocaleString() : printTotals.quantityBalance < 0 ? Math.abs(printTotals.quantityBalance).toLocaleString() : '-'} ${printTotals.quantityBalance >= 0 ? 'CR' : printTotals.quantityBalance < 0 ? 'DR' : ''}
         </td>
-        <td colspan="1" style="text-align: right; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1;">BALANCE:</td>
-        <td colspan="2" style="text-align: center; padding: 2px 1px; border: 1px solid #000; font-size: 11px; font-weight: bold; line-height: 1.1; color: ${printTotals.balance >= 0 ? '#059669' : '#dc2626'};">
+        <td colspan="1" class="text-right">BALANCE:</td>
+        <td colspan="2" class="col-balance text-center" style="color: ${printTotals.balance >= 0 ? '#059669' : '#dc2626'};">
 ${Math.abs(printTotals.balance).toLocaleString()} ${printTotals.balance >= 0 ? 'CR' : 'DR'}
         </td>
       </tr>
@@ -803,16 +806,16 @@ ${Math.abs(printTotals.balance).toLocaleString()} ${printTotals.balance >= 0 ? '
         <table class="no-repeat-header" style="margin: 0; padding: 0; border-top: 1px solid #000;">
           <thead>
             <tr>
-              <th style="width: 3%; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">S.No</th>
-              <th style="width: 8%; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Date</th>
-              <th style="width: 15%; padding: 2px 1px; font-size: 11px; font-weight: bold; line-height: 1.1;">Company</th>
-              <th style="width: 15%; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Account</th>
-              <th style="width: 12%; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Sub Account</th>
-              <th style="width: 27%; padding: 2px 1px; font-size: 11px; word-wrap: break-word; line-height: 1.1; font-weight: bold;">Particulars</th>
-              <th style="width: 5%; text-align: center; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Purchase Qty</th>
-              <th style="width: 5%; text-align: center; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Sale Qty</th>
-              <th style="width: 5%; text-align: right; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Credit</th>
-              <th style="width: 5%; text-align: right; padding: 2px 1px; font-size: 11px; line-height: 1.1; font-weight: bold;">Debit</th>
+              <th class="col-sno">S.No</th>
+              <th class="col-date">Date</th>
+              <th class="col-company">Company</th>
+              <th class="col-account">Account</th>
+              <th class="col-sub-account">Sub Account</th>
+              <th class="col-particulars">Particulars</th>
+              <th class="col-purchase-qty">Purchase Qty</th>
+              <th class="col-sale-qty">Sale Qty</th>
+              <th class="col-credit">Credit</th>
+              <th class="col-debit">Debit</th>
             </tr>
           </thead>
           <tbody>
@@ -1019,6 +1022,7 @@ ${Math.abs(printTotals.balance).toLocaleString()} ${printTotals.balance >= 0 ? '
               page-break-inside: avoid;
               page-break-after: auto;
             }
+            ${getSharedPrintStyles({ isLandscape: false })}
           </style>
         </head>
         <body>
@@ -1104,11 +1108,33 @@ ${Math.abs(printTotals.balance).toLocaleString()} ${printTotals.balance >= 0 ? '
 
   return (
     <div className='space-y-6'>
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
           <div className='flex items-center gap-3 mb-1'>
-            <h1 className='text-3xl font-bold text-gray-900'>Detailed Ledger</h1>
+            <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+              Detailed Ledger
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                currentBook?.is_locked 
+                  ? 'bg-red-100 text-red-700' 
+                  : tableMode === 'itr' 
+                    ? 'bg-emerald-100 text-emerald-700' 
+                    : 'bg-blue-100 text-blue-700'
+              }`}>
+                {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+              </span>
+            </h1>
             <ModeLabel />
           </div>
           <p className='text-gray-600'>

@@ -27,10 +27,13 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(
     },
     ref
   ) => {
+    const isFinance = typeof window !== 'undefined' && window.location.pathname.startsWith('/finance');
+    const displayPlaceholder = isFinance ? placeholder.toUpperCase() : placeholder;
+
     return (
       <div className={className}>
         {label && (
-          <label className='block text-sm font-medium text-gray-700 mb-1'>
+          <label className={isFinance ? 'peek-label uppercase' : 'block text-sm font-medium text-gray-700 mb-1'}>
             {label}
             {required && <span className='text-red-500 ml-1'>*</span>}
           </label>
@@ -42,13 +45,13 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(
           onKeyDown={onKeyDown}
           disabled={disabled}
           required={required}
-          className='w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed'
+          className={`w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed ${isFinance ? 'peek-button uppercase' : ''}`}
           style={{ opacity: disabled ? 0.7 : 1 }}
         >
-          <option value=''>{placeholder}</option>
+          <option value=''>{displayPlaceholder}</option>
           {options.map(option => (
             <option key={option.value} value={option.value}>
-              {option.label}
+              {isFinance ? option.label.toUpperCase() : option.label}
             </option>
           ))}
         </select>

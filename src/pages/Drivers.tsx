@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import Input from '../components/UI/Input';
@@ -9,14 +10,55 @@ import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import { format } from 'date-fns';
 import { supabase } from '../lib/supabase';
-import { Edit } from 'lucide-react';
+import { Edit, AlertTriangle } from 'lucide-react';
+import { useBook } from '../contexts/BookContext';
 
 const Drivers: React.FC = () => {
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingDriver, setEditingDriver] = useState<Driver | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const location = useLocation();
+  const queryParams = new URLSearchParams(location.search);
+  const highlightExpiring = queryParams.get('highlightExpiring') === 'true' || location.state?.highlightExpiring;
+
+  const [isHighlightActive, setIsHighlightActive] = useState(false);
+
+  // Helper function to check if a driver license is expired or expiring soon
+  const isDriverLicenseExpiringSoon = (driver: Driver) => {
+    if (!driver.exp_date) return false;
+    const today = new Date();
+    const expiry = new Date(driver.exp_date);
+    const diffDays = Math.ceil((expiry.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    return diffDays <= 30; // Expired (negative days) or Expiring (<=30 days)
+  };
+
+  useEffect(() => {
+    if (highlightExpiring && drivers.length > 0) {
+      setIsHighlightActive(true);
+      const timer = setTimeout(() => {
+        setIsHighlightActive(false);
+      }, 5000); // 5 seconds highlight
+
+      const scrollTimer = setTimeout(() => {
+        const firstExpiringDriver = drivers.find(isDriverLicenseExpiringSoon);
+        if (firstExpiringDriver) {
+          const element = document.getElementById(`driver-row-${firstExpiringDriver.id}`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }
+      }, 300);
+
+      return () => {
+        clearTimeout(timer);
+        clearTimeout(scrollTimer);
+      };
+    }
+  }, [drivers, highlightExpiring]);
 
   // Driver state according to schema
   const [newDriver, setNewDriver] = useState({
@@ -41,12 +83,21 @@ const Drivers: React.FC = () => {
 
   useEffect(() => {
     loadDrivers();
-  }, [tableMode]);
+  }, [tableMode, currentBook?.id]);
 
   const loadDrivers = async () => {
     setLoading(true);
     try {
-      const driversData = await supabaseDB.getDrivers();
+      let driversData = await supabaseDB.getDrivers();
+      if (highlightExpiring) {
+        driversData = [...driversData].sort((a, b) => {
+          const aExp = isDriverLicenseExpiringSoon(a);
+          const bExp = isDriverLicenseExpiringSoon(b);
+          if (aExp && !bExp) return -1;
+          if (!aExp && bExp) return 1;
+          return 0;
+        });
+      }
       setDrivers(driversData);
     } catch (error) {
       console.error('Error loading drivers:', error);
@@ -68,6 +119,10 @@ const Drivers: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     setLoading(true);
 
     try {
@@ -149,19 +204,43 @@ const Drivers: React.FC = () => {
   };
 
   const handleEdit = (driver: Driver) => {
+    if (currentBook?.is_locked) {
+      toast.error('This Book is Locked (Read Only). Writing/Editing/Deletion is blocked.');
+      return;
+    }
     setEditingDriver({ ...driver });
     setShowAddForm(false);
   };
 
   return (
     <div className='min-h-screen flex flex-col'>
+      {/* Locked Book Banner */}
+      {currentBook?.is_locked && (
+        <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print mb-6">
+          <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+          <div>
+            <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+            <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+          </div>
+        </div>
+      )}
+
       {/* Page content */}
       <div className='space-y-6'>
         <div className='flex items-center justify-between'>
           <div>
             <div className='flex items-center gap-3 mb-1'>
-              <h1 className='text-2xl font-bold text-gray-900'>
+              <h1 className='text-2xl font-bold text-gray-900 flex items-center gap-2.5'>
                 Drivers Management
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                  currentBook?.is_locked 
+                    ? 'bg-red-100 text-red-700' 
+                    : tableMode === 'itr' 
+                      ? 'bg-emerald-100 text-emerald-700' 
+                      : 'bg-blue-100 text-blue-700'
+                }`}>
+                  {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+                </span>
               </h1>
               <ModeLabel />
             </div>
@@ -170,14 +249,16 @@ const Drivers: React.FC = () => {
             </p>
           </div>
 
-          <Button
-            onClick={() => {
-              setShowAddForm(!showAddForm);
-              setEditingDriver(null);
-            }}
-          >
-            Add Driver
-          </Button>
+          {!currentBook?.is_locked && (
+            <Button
+              onClick={() => {
+                setShowAddForm(!showAddForm);
+                setEditingDriver(null);
+              }}
+            >
+              Add Driver
+            </Button>
+          )}
         </div>
 
         {/* Add/Edit Driver Form */}
@@ -342,15 +423,35 @@ const Drivers: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {drivers.map(driver => (
-                  <tr
-                    key={driver.id}
-                    className='border-b hover:bg-gray-50 transition-colors'
-                  >
-                    <td className='px-3 py-2 font-medium'>{driver.sno}</td>
-                    <td className='px-3 py-2 font-bold text-blue-700'>
-                      {driver.driver_name}
-                    </td>
+                {drivers.map(driver => {
+                  const isExpiring = isDriverLicenseExpiringSoon(driver);
+                  const isHighlighted = isHighlightActive && isExpiring;
+                  
+                  let rowBg = 'hover:bg-gray-50';
+                  let borderClass = 'border-b border-gray-100';
+
+                  if (isHighlighted) {
+                    rowBg = 'bg-[#FEF3C7] hover:bg-[#FEF3C7]';
+                    borderClass = 'border-2 border-[#F59E0B]';
+                  }
+
+                  return (
+                    <tr
+                      key={driver.id}
+                      id={`driver-row-${driver.id}`}
+                      className={`transition-all duration-1000 ${borderClass} ${rowBg}`}
+                    >
+                      <td className='px-3 py-2 font-medium'>{driver.sno}</td>
+                      <td className='px-3 py-2 font-bold text-blue-700'>
+                        <div className="flex items-center gap-2">
+                          {driver.driver_name}
+                          {isHighlighted && (
+                            <span className='inline-flex items-center text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300 animate-pulse'>
+                              🔔 Opened From Dashboard
+                            </span>
+                          )}
+                        </div>
+                      </td>
                     <td className='px-3 py-2'>{driver.license_no}</td>
                     <td className='px-3 py-2'>
                       {driver.exp_date
@@ -382,18 +483,20 @@ const Drivers: React.FC = () => {
                     </td>
                     <td className='px-3 py-2 text-center'>
                       <div className='flex items-center gap-2'>
-                        <Button
-                          size='sm'
-                          variant='secondary'
-                          icon={Edit}
-                          onClick={() => handleEdit(driver)}
-                        >
-                          Edit
-                        </Button>
+                        {!currentBook?.is_locked && (
+                          <Button
+                            size='sm'
+                            variant='secondary'
+                            icon={Edit}
+                            onClick={() => handleEdit(driver)}
+                          >
+                            Edit
+                          </Button>
+                        )}
                       </div>
                     </td>
                   </tr>
-                ))}
+                )})}
               </tbody>
             </table>
           </div>

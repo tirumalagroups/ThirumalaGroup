@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Card from '../components/UI/Card';
 import Button from '../components/UI/Button';
 import SearchableSelect from '../components/UI/SearchableSelect';
@@ -10,7 +10,8 @@ import toast from 'react-hot-toast';
 import ModeLabel from '../components/UI/ModeLabel';
 import CustomCalendar from '../components/UI/CustomCalendar';
 import { format, subDays } from 'date-fns';
-import { Search, Calendar } from 'lucide-react';
+import { Search, Calendar, AlertTriangle } from 'lucide-react';
+import { useBook } from '../contexts/BookContext';
 
 interface DailyReportData {
   entries: any[];
@@ -83,6 +84,7 @@ const matchDailyReportSearchTerm = (entry: any, searchTerm: string): boolean => 
 
 const DailyReport: React.FC = () => {
   const { mode: tableMode } = useTableMode();
+  const { currentBook } = useBook();
   
   // Default to today's date whenever opened; do not load previously selected date
   const initialDate = format(new Date(), 'yyyy-MM-dd');
@@ -115,6 +117,52 @@ const DailyReport: React.FC = () => {
   // Calendar entries - same structure as DetailedLedger
   const [calendarEntries, setCalendarEntries] = useState<any[]>([]);
 
+  // Unique sorted dates containing transactions for navigation
+  const availableDates = useMemo(() => {
+    const dates = [...new Set(calendarEntries.map(e => e.c_date).filter(Boolean))];
+    return dates.sort();
+  }, [calendarEntries]);
+
+  const hasPrev = useMemo(() => {
+    return availableDates.some(d => d < selectedDate);
+  }, [availableDates, selectedDate]);
+
+  const hasNext = useMemo(() => {
+    return availableDates.some(d => d > selectedDate);
+  }, [availableDates, selectedDate]);
+
+  const isPrevDisabled = !hasPrev;
+  const isNextDisabled = !hasNext;
+
+  const navigateDate = (direction: 'prev' | 'next') => {
+    if (availableDates.length === 0) return;
+    
+    const currentIndex = availableDates.indexOf(selectedDate);
+    let newDate = '';
+    
+    if (currentIndex !== -1) {
+      if (direction === 'next' && currentIndex < availableDates.length - 1) {
+        newDate = availableDates[currentIndex + 1];
+      } else if (direction === 'prev' && currentIndex > 0) {
+        newDate = availableDates[currentIndex - 1];
+      }
+    } else {
+      // Find the closest date
+      if (direction === 'next') {
+        const next = availableDates.find(d => d > selectedDate);
+        if (next) newDate = next;
+      } else {
+        const prev = [...availableDates].reverse().find(d => d < selectedDate);
+        if (prev) newDate = prev;
+      }
+    }
+    
+    if (newDate) {
+      setSelectedDate(newDate);
+      setDisplayDate(convertToDisplayFormat(newDate));
+    }
+  };
+
   // Load all entries for calendar - exactly like DetailedLedger does
   useEffect(() => {
     const loadCalendarEntries = async () => {
@@ -140,7 +188,7 @@ const DailyReport: React.FC = () => {
     };
     
     loadCalendarEntries();
-  }, [tableMode]);
+  }, [tableMode, currentBook?.id]);
 
   // Pre-calculate company balances for print preview when showing preview and no specific company is selected
   useEffect(() => {
@@ -206,12 +254,12 @@ const DailyReport: React.FC = () => {
   // Load base companies once on mount
   useEffect(() => {
     loadCompanies();
-  }, []);
+  }, [currentBook?.id]);
 
   // Re-generate report when any filter changes
   useEffect(() => {
     generateReport();
-  }, [selectedDate, selectedCompany, searchTerm]);
+  }, [selectedDate, selectedCompany, searchTerm, currentBook?.id]);
 
   // Do not persist date to localStorage per user request
   useEffect(() => {
@@ -228,7 +276,7 @@ const DailyReport: React.FC = () => {
       console.log('🔄 Date changed, loading companies for date:', selectedDate);
       loadCompaniesByDate(selectedDate);
     }
-  }, [selectedDate]);
+  }, [selectedDate, currentBook?.id]);
 
   const loadCompanies = async () => {
     try {
@@ -541,11 +589,33 @@ const DailyReport: React.FC = () => {
   return (
     <div className='min-h-screen flex flex-col'>
       <div className='w-full px-4 space-y-6'>
+        {/* Locked Book Banner */}
+        {currentBook?.is_locked && (
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm flex items-center gap-3 no-print">
+            <AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0 animate-pulse" />
+            <div>
+              <h3 className="text-sm font-bold text-red-800">This Book Is Locked (Read Only)</h3>
+              <p className="text-xs text-red-700">Writing, editing, and deletion operations are disabled for this accounting period.</p>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <div className='flex items-center justify-between'>
           <div>
             <div className='flex items-center gap-3 mb-1'>
-              <h1 className='text-3xl font-bold text-gray-900'>Daily Report</h1>
+              <h1 className='text-3xl font-bold text-gray-900 flex items-center gap-2.5'>
+                Daily Report
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                  currentBook?.is_locked 
+                    ? 'bg-red-100 text-red-700' 
+                    : tableMode === 'itr' 
+                      ? 'bg-emerald-100 text-emerald-700' 
+                      : 'bg-blue-100 text-blue-700'
+                }`}>
+                  {tableMode === 'itr' ? 'ITR Mode' : 'Regular Mode'} | {currentBook?.book_code || 'No Book'}
+                </span>
+              </h1>
               <ModeLabel />
             </div>
             <p className='text-gray-600'>
@@ -556,73 +626,89 @@ const DailyReport: React.FC = () => {
         
         {/* Responsive filter bar */}
         <div className='flex flex-col md:flex-row gap-4 items-end'>
-          <div className='flex-1'>
+          <div className='flex-[1.3] min-w-[290px] w-full'>
             <label className='block text-sm font-medium text-gray-700 mb-1'>
               Date (dd/MM/yyyy)
             </label>
-            <div className='relative'>
-              <input
-                type='text'
-                value={displayDate}
-                placeholder='dd/MM/yyyy'
-                onChange={async (e) => {
-                  const inputValue = e.target.value;
-                  setDisplayDate(inputValue);
-                  
-                  // Convert to internal format for database queries
-                  const internalDate = convertToInternalFormat(inputValue);
-                  if (internalDate && internalDate !== '--') {
-                    setSelectedDate(internalDate);
-                    // Clear company selection when date changes
-                    setSelectedCompany('');
-                    // Load companies for the new date
-                    await loadCompaniesByDate(internalDate);
-                  }
-                }}
-                onBlur={async (e) => {
-                  const inputValue = e.target.value;
-                  // Validate and format the date on blur
-                  if (inputValue && inputValue.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+            <div className='flex items-center gap-2 w-full'>
+              <Button
+                size='sm'
+                variant='secondary'
+                onClick={() => navigateDate('prev')}
+                disabled={isPrevDisabled}
+                className='px-3 shrink-0'
+              >
+                Previous
+              </Button>
+              <div className='relative flex-1 w-full'>
+                <input
+                  type='text'
+                  value={displayDate}
+                  placeholder='dd/MM/yyyy'
+                  onChange={async (e) => {
+                    const inputValue = e.target.value;
+                    setDisplayDate(inputValue);
+                    
+                    // Convert to internal format for database queries
                     const internalDate = convertToInternalFormat(inputValue);
                     if (internalDate && internalDate !== '--') {
                       setSelectedDate(internalDate);
-                      setDisplayDate(inputValue); // Keep the formatted input
-                      // Clear company selection when date changes
-                      setSelectedCompany('');
                       // Load companies for the new date
                       await loadCompaniesByDate(internalDate);
                     }
-                  } else if (inputValue) {
-                    // If invalid format, reset to current date
-                    const currentDate = format(new Date(), 'yyyy-MM-dd');
-                    setSelectedDate(currentDate);
-                    setDisplayDate(convertToDisplayFormat(currentDate));
-                  }
-                }}
-                className='w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500'
-              />
-              {/* Calendar button */}
-              <button
-                type='button'
-                onClick={() => setShowCalendar(!showCalendar)}
-                className='absolute right-2 top-1/2 transform -translate-y-1/2 p-1 hover:bg-gray-100 rounded'
-              >
-                <Calendar className='w-5 h-5 text-gray-500' />
-              </button>
-              
-              {/* Custom Calendar with red dots - exactly like DetailedLedger */}
-              {showCalendar && (
-                <CustomCalendar
-                  entries={calendarEntries}
-                  onDateSelect={(date) => {
-                    handleDatePickerChange(date);
-                    setShowCalendar(false);
                   }}
-                  selectedDate={selectedDate}
-                  onClose={() => setShowCalendar(false)}
-                  dotColor="red"
+                  onBlur={async (e) => {
+                    const inputValue = e.target.value;
+                    // Validate and format the date on blur
+                    if (inputValue && inputValue.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+                      const internalDate = convertToInternalFormat(inputValue);
+                      if (internalDate && internalDate !== '--') {
+                        setSelectedDate(internalDate);
+                        setDisplayDate(inputValue); // Keep the formatted input
+                        // Load companies for the new date
+                        await loadCompaniesByDate(internalDate);
+                      }
+                    } else if (inputValue) {
+                      // If invalid format, reset to current date
+                      const currentDate = format(new Date(), 'yyyy-MM-dd');
+                      setSelectedDate(currentDate);
+                      setDisplayDate(convertToDisplayFormat(currentDate));
+                    }
+                  }}
+                  className='w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500'
                 />
-              )}
+                {/* Calendar button */}
+                <button
+                  type='button'
+                  onClick={() => setShowCalendar(!showCalendar)}
+                  className='absolute right-2 top-1/2 transform -translate-y-1/2 p-1 hover:bg-gray-100 rounded'
+                >
+                  <Calendar className='w-5 h-5 text-gray-500' />
+                </button>
+                
+                {/* Custom Calendar with red dots - exactly like DetailedLedger */}
+                {showCalendar && (
+                  <CustomCalendar
+                    entries={calendarEntries}
+                    onDateSelect={(date) => {
+                      handleDatePickerChange(date);
+                      setShowCalendar(false);
+                    }}
+                    selectedDate={selectedDate}
+                    onClose={() => setShowCalendar(false)}
+                    dotColor="red"
+                  />
+                )}
+              </div>
+              <Button
+                size='sm'
+                variant='secondary'
+                onClick={() => navigateDate('next')}
+                disabled={isNextDisabled}
+                className='px-3 shrink-0'
+              >
+                Next
+              </Button>
             </div>
           </div>
           <div className='flex-1'>
