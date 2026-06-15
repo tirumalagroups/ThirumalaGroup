@@ -92,13 +92,42 @@ export function resolveSchemaAndTable(tableName: string): { schema: string; tabl
   return { schema, table: baseTable };
 }
 
+// Helper to recursively wrap query builder and rewrite table names in select queries
+function wrapBuilder(builder: any): any {
+  return new Proxy(builder, {
+    get(target, prop, receiver) {
+      const origMethod = Reflect.get(target, prop, receiver);
+      if (typeof origMethod === 'function') {
+        return function (...args: any[]) {
+          const methodName = String(prop);
+          if (methodName === 'select' && args[0] && typeof args[0] === 'string') {
+            let cols = args[0];
+            cols = cols.replace(/finance_customers\b/g, 'borrowers');
+            cols = cols.replace(/finance_transactions\b/g, 'loan_transactions');
+            cols = cols.replace(/finance_dues\b/g, 'due_entries');
+            cols = cols.replace(/finance_(\w+)\b/g, '$1');
+            args[0] = cols;
+          }
+          const result = origMethod.apply(target, args);
+          if (result && typeof result === 'object' && typeof result.then !== 'function') {
+            return wrapBuilder(result);
+          }
+          return result;
+        };
+      }
+      return origMethod;
+    },
+  });
+}
+
 // Proxied supabase client wrapper
 export const supabase = new Proxy(rawSupabase, {
   get(target, prop, receiver) {
     if (prop === 'from') {
       return (tableName: string) => {
         const { schema, table } = resolveSchemaAndTable(tableName);
-        return target.schema(schema).from(table);
+        const builder = target.schema(schema).from(table);
+        return wrapBuilder(builder);
       };
     }
     return Reflect.get(target, prop, receiver);

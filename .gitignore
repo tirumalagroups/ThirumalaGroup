@@ -109,3 +109,25 @@ temp/
 # Scratch files and temporary outputs
 scratch/
 tsc_output.txt
+
+# Agent and tool configurations
+.agents/
+.bolt/
+brain/
+migration_backups/
+
+# Documents and reports
+*.pdf
+*.docx
+and package versions*
+
+# Temporary utility scripts in root
+apply-finance-typography-v2.cjs
+apply_typography.cjs
+apply_typography.js
+bulk-font-fix.cjs
+fix_lint.cjs
+fix_lint.js
+
+# Migration files not intended for repository
+supabase/mumbai_migration_schema.sql

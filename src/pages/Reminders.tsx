@@ -503,19 +503,8 @@ const Reminders: React.FC = () => {
     }
   };
 
-  const getPriorityBadgeClass = (priority: string) => {
-    switch (priority) {
-      case 'critical':
-        return 'bg-red-600 text-white border-red-700 shadow-md';
-      case 'high':
-        return 'bg-orange-500 text-white border-orange-600 shadow-md';
-      case 'medium':
-        return 'bg-yellow-400 text-yellow-950 border-yellow-500 shadow-sm';
-      case 'low':
-        return 'bg-blue-200 text-blue-900 border-blue-400 shadow-sm';
-      default:
-        return 'bg-gray-200 text-gray-800 border-gray-400 shadow-sm';
-    }
+  const getPriorityBadgeClass = (_priority: string) => {
+    return 'bg-slate-700 text-white border-slate-800 shadow-md';
   };
 
   return (
@@ -816,8 +805,8 @@ const Reminders: React.FC = () => {
                         rowBg = 'bg-[#FFF7ED] hover:bg-[#FFEDD5]';
                         borderStyle = 'border-2 border-[#F97316]';
                       } else if (isDueUnseen) {
-                        rowBg = 'bg-orange-50/40 hover:bg-orange-50/80';
-                        borderStyle = 'border-b border-orange-200';
+                        rowBg = 'bg-orange-200 hover:bg-orange-300';
+                        borderStyle = 'border-b-2 border-orange-400';
                       } else if (r.status === 'completed') {
                         rowBg = 'bg-green-25/50 hover:bg-green-25';
                       } else if (colorStatus === 'dark-red') {
