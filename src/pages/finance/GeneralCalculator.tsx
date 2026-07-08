@@ -1,3 +1,4 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Card from '../../components/UI/Card';
@@ -30,7 +31,7 @@ const GeneralCalculator: React.FC = () => {
   // Inputs State
   const [loanType, setLoanType] = useState<string>('CD');
   const [principal, setPrincipal] = useState<string>('100000');
-  const [loanDate, setLoanDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [loanDate, setLoanDate] = useState<string>(() => getLocalBusinessDateISO());
   const [period, setPeriod] = useState<string>('365');
   const [rate, setRate] = useState<string>('3');
   const [overdue, setOverdue] = useState<string>('0.75');

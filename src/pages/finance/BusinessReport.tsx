@@ -1,9 +1,9 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useEffect, useState } from 'react';
 import Button from '../../components/UI/Button';
 import { supabaseFinance } from '../../lib/supabaseFinance';
 import { supabase } from '../../lib/supabase';
 import { financeLedgerSettingsService } from '../../services/financeLedgerSettingsService';
-import { financeCalculationService } from '../../services/financeCalculationService';
 import { Printer, ArrowLeft } from 'lucide-react';
 import toast from 'react-hot-toast';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
@@ -45,6 +45,12 @@ interface PartnerOutstandingRow {
   status: string;
 }
 
+const startOfDay = (d: string | Date | number) => {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+};
+
 const BusinessReport: React.FC = () => {
   const navigate = useNavigate();
   
@@ -53,7 +59,7 @@ const BusinessReport: React.FC = () => {
     d.setMonth(d.getMonth() - 1);
     return d.toISOString().split('T')[0];
   });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState(() => getLocalBusinessDateISO());
   
   const [loading, setLoading] = useState(false);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
@@ -96,7 +102,7 @@ const BusinessReport: React.FC = () => {
       // Fetch specific dues
       const { data: rawDues } = await supabase
         .from('finance_dues')
-        .select(`*, finance_loans(*, customer:finance_customers(*))`)
+        .select(`*, finance_loans(*, customer:finance_customers!customer_id(*))`)
         .gte('due_date', startDate)
         .lte('due_date', endDate);
 
@@ -126,9 +132,7 @@ const BusinessReport: React.FC = () => {
           const pt = pTotalsMap.get(pName)!;
           
           const principal = Number(loan.amount);
-          const cat = loan.loan_category?.trim().toUpperCase() || 'CD';
-          const setting = ledgerSettings[cat] || ledgerSettings['CD'];
-          const interest = setting ? financeCalculationService.calculateInterestFromSetting(principal, Number(loan.duration_months) * 30, setting, Number(loan.duration_months)) : (principal * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
+          const interest = (principal * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
           
           const loanTxs = txs.filter(t => t.loan_id === loan.id && t.type === 'Collection');
           const paid = loanTxs.reduce((sum, t) => sum + Number(t.amount), 0);
@@ -200,21 +204,38 @@ const BusinessReport: React.FC = () => {
     const today = new Date();
     validDues.forEach(due => {
       if (due.status === 'Pending' || due.status === 'Partially Paid') {
-        const principal = Number(due.principal_amount) || 0;
-        const interest = Number(due.interest_amount) || 0;
+        let principal = 0;
+        let interest = 0;
+        const loan = due.finance_loans;
+        if (loan) {
+          const totalPrincipal = Number(loan.amount) || 0;
+          const durationMonths = Number(loan.duration_months) || 12;
+          const interestRate = Number(loan.interest_rate) || 3;
+          
+          const totalInterest = totalPrincipal * (interestRate / 100) * durationMonths;
+          
+          const totalLoanRepayable = totalPrincipal + totalInterest;
+          const interestRatio = totalLoanRepayable > 0 ? totalInterest / totalLoanRepayable : 0;
+          
+          const dueAmt = Number(due.amount) || 0;
+          interest = dueAmt * interestRatio;
+          principal = dueAmt * (1 - interestRatio);
+        }
         
         const dueAmt = Number(due.amount) || 0;
         const duePaid = Number(due.paid_amount) || 0;
         const duePending = dueAmt - duePaid;
 
-        const overdueDays = Math.max(0, Math.floor((today.getTime() - new Date(due.due_date).getTime()) / (1000 * 60 * 60 * 24)));
+        const todayMs = startOfDay(today);
+        const dueMs = startOfDay(due.due_date);
+        const overdueDays = todayMs > dueMs ? Math.round((todayMs - dueMs) / (1000 * 60 * 60 * 24)) : 0;
         let penalty = Number(due.penalty_amount) || 0;
 
         if (duePending > 0 && overdueDays > 0) {
            const cat = due.finance_loans?.loan_category?.trim().toUpperCase() || 'CD';
            const setting = ledgerSettings[cat] || ledgerSettings['CD'];
-           if (setting) {
-              const calcPenalty = financeCalculationService.calculatePenaltyFromSetting(duePending, overdueDays, setting);
+           if (setting && overdueDays > 5) {
+              const calcPenalty = (duePending * (setting.overdue / 100) * overdueDays) / (setting.days_per_year / 12);
               penalty = calcPenalty > penalty ? Math.round(calcPenalty) : penalty;
            }
         }
@@ -261,7 +282,7 @@ const BusinessReport: React.FC = () => {
 
       const { data: rawDues } = await supabase
         .from('finance_dues')
-        .select(`*, finance_loans(*, customer:finance_customers(*))`)
+        .select(`*, finance_loans(*, customer:finance_customers!customer_id(*))`)
         .gte('due_date', startDate)
         .lte('due_date', endDate);
 

@@ -1,9 +1,10 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Card from '../../components/UI/Card';
 import Input from '../../components/UI/Input';
 import { supabaseFinance, FinanceCustomer, FinancePartner } from '../../lib/supabaseFinance';
-import { supabase } from '../../lib/supabase';
+import { supabase } from '../../lib/supabaseDatabase';
 import { 
   ArrowLeft, 
   Check, 
@@ -214,7 +215,7 @@ const OldDataEntry: React.FC = () => {
   }, [renewals]);
 
   // Accrued Forward Computations
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const todayStr = useMemo(() => getLocalBusinessDateISO(), []);
 
   const lastReferenceDate = useMemo(() => {
     if (sortedRenewals.length > 0) {
@@ -465,7 +466,7 @@ const OldDataEntry: React.FC = () => {
         dDate.setDate(startDateObj.getDate() + i);
         duesList.push({
           loan_id: newLoan.id,
-          due_date: dDate.toISOString().split('T')[0],
+          due_date: getLocalBusinessDateISO(dDate),
           amount: parseFloat(dueAmount.toFixed(2)),
           paid_amount: 0,
           status: 'Pending'

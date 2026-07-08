@@ -1727,13 +1727,14 @@ const CsvUpload: React.FC = () => {
       console.log('🔍 Testing database connection...');
 
       // Test basic fetch to Supabase
-      const testUrl = 'https://pmqeegdmcrktccszgbwu.supabase.co/rest/v1/';
+      const testUrl = import.meta.env.VITE_SUPABASE_URL ? import.meta.env.VITE_SUPABASE_URL + '/rest/v1/' : '';
       try {
         const response = await fetch(testUrl, {
           method: 'HEAD',
           headers: {
             apikey:
-              'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBtcWVlZ2RtY3JrdGNjc3pnYnd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5MDY1OTUsImV4cCI6MjA2NzQ4MjU5NX0.OqaYKbr2CcLd10JTdyy0IRawUPwW3KGCAbsPNThcCFM',
+              import.meta.env.VITE_SUPABASE_ANON_KEY ||
+              import.meta.env.VITE_SUPABASE_ANON_KEY || '',
           },
         });
 

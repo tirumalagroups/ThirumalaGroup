@@ -51,6 +51,7 @@ import Camera from './pages/finance/Camera';
 import Daybook from './pages/finance/Daybook';
 import DailyReportFinance from './pages/finance/DailyReport';
 import GeneralLedger from './pages/finance/GeneralLedger';
+import DetailedLedgerFinance from './pages/finance/DetailedLedger';
 import CDLedger from './pages/finance/CDLedger';
 import STBDLedger from './pages/finance/STBDLedger';
 import HPLedger from './pages/finance/HPLedger';
@@ -73,6 +74,8 @@ import Guarantors from './pages/finance/Guarantors';
 import NewPartner from './pages/finance/NewPartner';
 import CashBook from './pages/finance/CashBook';
 import LedgerSettings from './pages/finance/LedgerSettings';
+import PaymentFollowUp from './pages/finance/PaymentFollowUp';
+import TransactionApproval from './pages/finance/TransactionApproval';
 
 // Error Boundary Component
 class ErrorBoundary extends React.Component<
@@ -132,9 +135,23 @@ class ErrorBoundary extends React.Component<
 
 // Offline Guard component to block access to unsupported routes when offline
 const OfflineGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isOnline } = useOffline();
+  const { connectionStatus } = useOffline();
 
-  if (!isOnline) {
+  if (connectionStatus === 'CHECKING') {
+    return (
+      <div className='min-h-[60vh] bg-white border border-gray-150 rounded-2xl p-8 flex flex-col items-center justify-center text-center max-w-lg mx-auto my-12 font-outfit shadow-sm'>
+        <div className='animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4'></div>
+        <h1 className='text-xl font-bold text-gray-900 mb-2'>
+          Verifying Connection
+        </h1>
+        <p className='text-gray-600 mb-6 text-sm max-w-xs'>
+          Please wait while we verify your network status.
+        </p>
+      </div>
+    );
+  }
+
+  if (connectionStatus === 'OFFLINE') {
     return (
       <div className='min-h-[60vh] bg-white border border-gray-150 rounded-2xl p-8 flex flex-col items-center justify-center text-center max-w-lg mx-auto my-12 font-outfit shadow-sm'>
         <div className='w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-4 text-3xl'>
@@ -275,11 +292,13 @@ const AppContent: React.FC = () => {
           <Route path='finance/daybook' element={<OfflineGuard><Daybook /></OfflineGuard>} />
           <Route path='finance/daily-report' element={<OfflineGuard><DailyReportFinance /></OfflineGuard>} />
           <Route path='finance/general-ledger' element={<OfflineGuard><GeneralLedger /></OfflineGuard>} />
+          <Route path='finance/detailed-ledger' element={<OfflineGuard><DetailedLedgerFinance /></OfflineGuard>} />
           <Route path='finance/cd-ledger' element={<OfflineGuard><CDLedger /></OfflineGuard>} />
           <Route path='finance/stbd-ledger' element={<OfflineGuard><STBDLedger /></OfflineGuard>} />
           <Route path='finance/hp-ledger' element={<OfflineGuard><HPLedger /></OfflineGuard>} />
           <Route path='finance/tbd-ledger' element={<OfflineGuard><TBDLedger /></OfflineGuard>} />
           <Route path='finance/dues-ledger' element={<OfflineGuard><DuesLedger /></OfflineGuard>} />
+          <Route path='finance/payment-followup' element={<OfflineGuard><PaymentFollowUp /></OfflineGuard>} />
           <Route path='finance/pl' element={<OfflineGuard><ProfitAndLoss /></OfflineGuard>} />
           <Route path='finance/final-statement' element={<OfflineGuard><FinalStatement /></OfflineGuard>} />
           <Route path='finance/business-report' element={<OfflineGuard><BusinessReport /></OfflineGuard>} />
@@ -297,6 +316,7 @@ const AppContent: React.FC = () => {
           <Route path='finance/new-partner' element={<OfflineGuard><NewPartner /></OfflineGuard>} />
           <Route path='finance/cash-book' element={<OfflineGuard><CashBook /></OfflineGuard>} />
           <Route path='finance/ledger-settings' element={<OfflineGuard><LedgerSettings /></OfflineGuard>} />
+          <Route path='finance/transaction-approval' element={<OfflineGuard><TransactionApproval /></OfflineGuard>} />
         </Route>
       </Routes>
     </Router>

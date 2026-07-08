@@ -5,8 +5,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Supabase configuration
-const supabaseUrl = 'https://qjqjqjqjqjqjqjqj.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFqcWpxanFqcWpxanFqcWpxanFqcWoiLCJyb2xlIjoiYW5vbiIsImlhdCI6MTY5OTk5OTk5OSwiZXhwIjoyMDE1NTc1OTk5fQ.example';
+const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || '';
 
 // Create Supabase client
 const supabase = createClient(supabaseUrl, supabaseKey);

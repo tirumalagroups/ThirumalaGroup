@@ -1,9 +1,11 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTableMode } from '../../contexts/TableModeContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { supabaseFinance } from '../../lib/supabaseFinance';
-import { financeLedgerSettingsService } from '../../services/financeLedgerSettingsService';
-import { financeCalculationService } from '../../services/financeCalculationService';
+
+
 import { 
   FileText, 
   Edit, 
@@ -32,6 +34,7 @@ interface DashboardStats {
 const FinanceDashboard: React.FC = () => {
   const navigate = useNavigate();
   const { mode: tableMode } = useTableMode();
+  const { user } = useAuth();
 
   useEffect(() => {
     if (tableMode !== 'finance') {
@@ -48,6 +51,7 @@ const FinanceDashboard: React.FC = () => {
     overdueLoansCount: 0
   });
   const [recentLoans, setRecentLoans] = useState<any[]>([]);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState<number>(0);
 
   useEffect(() => {
     if (tableMode === 'finance') {
@@ -62,15 +66,18 @@ const FinanceDashboard: React.FC = () => {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-      const loans = await supabaseFinance.getLoans();
-      const txs = await supabaseFinance.getTransactions();
-      const ledgerSettings = await financeLedgerSettingsService.getAllLedgerSettings();
+      const [loans, txs, pendingCount] = await Promise.all([
+        supabaseFinance.getLoans(),
+        supabaseFinance.getTransactions(),
+        user?.is_admin ? supabaseFinance.getPendingApprovalsCount() : Promise.resolve(0)
+      ]);
+      setPendingApprovalsCount(pendingCount);
 
       // Get today's local date string formatted as YYYY-MM-DD
       const today = new Date();
       const offset = today.getTimezoneOffset();
       const localToday = new Date(today.getTime() - (offset * 60 * 1000));
-      const todayStr = localToday.toISOString().split('T')[0];
+      const todayStr = getLocalBusinessDateISO(localToday);
 
       // 1. Disbursed (All-time)
       const totalDisbursed = loans.reduce((sum, loan) => sum + Number(loan.amount), 0);
@@ -82,10 +89,8 @@ const FinanceDashboard: React.FC = () => {
 
       loans.forEach(loan => {
         const principal = Number(loan.amount);
-        const cat = loan.loan_category?.trim().toUpperCase() || 'CD';
-        const setting = ledgerSettings[cat] || ledgerSettings['CD'];
         const duration = Number(loan.duration_months);
-        const interestAmount = setting ? financeCalculationService.calculateInterestFromSetting(principal, duration * 30, setting, duration) : (principal * (Number(loan.interest_rate) / 100) * duration);
+        const interestAmount = (principal * (Number(loan.interest_rate) / 100) * duration);
         const repayable = principal + interestAmount;
 
         const loanCols = txs.filter(t => t.loan_id === loan.id && t.type === 'Collection');
@@ -172,7 +177,7 @@ const FinanceDashboard: React.FC = () => {
         <div>
           <h1 className="finance-h1">DASHBOARD</h1>
           <p className="finance-small-label uppercase">
-            OVERVIEW OF TODAY'S CHITFUND OPERATIONS
+            OVERVIEW OF TODAY'S CD LEDGER OPERATIONS
           </p>
         </div>
         <div className="flex items-center gap-2.5">
@@ -192,6 +197,49 @@ const FinanceDashboard: React.FC = () => {
           </Link>
         </div>
       </div>
+
+      {/* Pending Approvals Card (Admin Only) */}
+      {user?.is_admin && pendingApprovalsCount > 0 && (
+        <div className="bg-[#fffbeb] border border-amber-200 rounded-2xl p-5 shadow-sm flex flex-col sm:flex-row justify-between items-center gap-4 transition-all">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-50 text-amber-600 rounded-xl border border-amber-200 shadow-inner">
+              <AlertCircle className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-amber-800 text-sm uppercase tracking-wide">
+                Transactions Pending Approval
+              </h3>
+              <p className="text-slate-600 text-xs mt-0.5 font-bold">
+                {pendingApprovalsCount} Pending
+              </p>
+            </div>
+          </div>
+          <Link
+            to="/finance/transaction-approval"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 text-white hover:bg-amber-700 rounded-lg text-xs font-bold uppercase transition-all shadow-sm"
+          >
+            Verify & Approve
+            <ChevronRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      )}
+      {user?.is_admin && pendingApprovalsCount === 0 && (
+        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm flex justify-between items-center transition-all">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-slate-100 text-slate-500 rounded-xl border border-slate-200 shadow-inner">
+              <Shield className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-slate-700 text-sm uppercase tracking-wide">
+                Transaction Approvals
+              </h3>
+              <p className="text-slate-400 text-xs mt-0.5 font-bold">
+                All transactions approved
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TODAY AT A GLANCE section */}
       <div className="space-y-3">

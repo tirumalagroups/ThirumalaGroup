@@ -23,6 +23,9 @@ interface InputProps {
   inputMode?: 'none' | 'text' | 'decimal' | 'numeric' | 'tel' | 'search' | 'email' | 'url';
   maxLength?: number;
   tabIndex?: number;
+  /** Optional leading icon component (e.g. Search, Calendar). Accepted but decorative — the component renders its own date-picker icon. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  icon?: React.ComponentType<any>;
 }
 
 const Input = forwardRef<HTMLInputElement, InputProps>(

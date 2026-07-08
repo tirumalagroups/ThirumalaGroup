@@ -52,7 +52,7 @@ const Login: React.FC = () => {
         {/* Logo/Image and Title */}
         <div className='flex flex-col items-center justify-center px-8 pt-8 pb-4'>
           <img
-            src='https://pmqeegdmcrktccszgbwu.supabase.co/storage/v1/object/public/images//download.jpeg.jpg'
+            src=''
             alt='Login Illustration'
             className='w-48 h-48 object-contain mb-4 rounded-xl shadow'
           />

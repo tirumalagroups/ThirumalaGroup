@@ -33,7 +33,7 @@ if (fs.existsSync(envPath)) {
 
 // Fallback to hardcoded values if env not found
 if (!supabaseUrl) {
-  supabaseUrl = 'https://pmqeegdmcrktccszgbwu.supabase.co';
+  supabaseUrl = process.env.VITE_SUPABASE_URL || '';
 }
 
 if (!supabaseServiceKey) {

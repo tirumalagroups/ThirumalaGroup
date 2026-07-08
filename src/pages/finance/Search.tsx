@@ -1,3 +1,4 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useEffect, useState } from 'react';
 import Card from '../../components/UI/Card';
 import Input from '../../components/UI/Input';
@@ -21,7 +22,7 @@ const SearchPage: React.FC = () => {
   
   // Collection Form state
   const [collectAmount, setCollectAmount] = useState('');
-  const [collectDate, setCollectDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [collectDate, setCollectDate] = useState(() => getLocalBusinessDateISO());
   const [collectRemarks, setCollectRemarks] = useState('');
   const [collecting, setCollecting] = useState(false);
 

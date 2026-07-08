@@ -1,37 +1,94 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { allocateCDPayment } from '../../services/cdLedgerEngine';
 
 import Card from '../../components/UI/Card';
 import Input from '../../components/UI/Input';
 import Button from '../../components/UI/Button';
 import { supabaseFinance, FinanceLoan, FinanceCustomer, FinanceTransaction, FinanceDue, FinanceDocument } from '../../lib/supabaseFinance';
 import { supabase } from '../../lib/supabase';
+import { cdLedgerRebuildService } from '../../services/cdLedgerRebuildService';
 import { useAuth } from '../../contexts/AuthContext';
 import { financeCalculationService } from '../../services/financeCalculationService';
-import { 
-  Printer, 
-  Download, 
-  RefreshCw, 
-  Search, 
-  Edit2, 
-  Save, 
-  X, 
-  User, 
-  File as FileIcon, 
+import {
+  Printer,
+  Download,
+  RefreshCw,
+  Search,
+  Edit2,
+  X,
+  User,
+  File as FileIcon,
   ShieldAlert,
   CreditCard,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   ArrowLeft,
   List
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { exportToExcel, exportToCSV } from '../../utils/excel';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 
-const startOfDay = (d: Date | string | number) => {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
+
+
+const mapAccountName = (name: string): string => {
+  const cleanName = (name || '').trim().toUpperCase();
+  if (cleanName === 'CD A/C') return 'CD Principal';
+  if (cleanName === 'CD COMMISSION A/C') return 'CD Interest';
+  if (cleanName === 'PENALTY A/C') return 'CD Penalty';
+  if (cleanName === 'CD DOCUMENT CHARGES A/C') return 'CD Document Charges';
+  if (cleanName === 'CD AMOUNT PAID') return 'CD Amount Paid';
+  return name || 'CD Principal';
+};
+
+const isPaymentCollectionEntry = (entry: any): boolean => {
+  const cleanName = (entry.account_name || '').trim().toUpperCase();
+  const cleanType = (entry.entry_type || '').trim().toUpperCase();
+  return (
+    cleanType === 'AMOUNT_PAID' ||
+    cleanName === 'CD AMOUNT PAID' ||
+    cleanName === 'CUSTOMER PAYMENT' ||
+    cleanName === 'AMOUNT RECEIVED'
+  );
+};
+const normalizeCDLedgerEntries = (entries: any[]) => {
+  return entries.map((entry: any) => {
+    let entryType = entry.entry_type;
+    let particulars = entry.particulars || '';
+    const accountNameLower = (entry.account_name || '').toLowerCase();
+    const particularsLower = particulars.toLowerCase();
+
+    if (entry.account_name) {
+      if (accountNameLower === 'cd commission a/c') {
+        const isOpeningRow = entryType === 'opening_commission' || entryType === 'Commission'
+          || (!entry.receipt_no || entry.receipt_no === '-');
+        if (isOpeningRow && entryType !== 'interest_payment' && entryType !== 'penalty_payment') {
+          entryType = 'opening_commission';
+          particulars = 'Opening CD Commission Charged';
+        }
+      } else if (accountNameLower === 'cd document charges a/c') {
+        if (entryType !== 'document_charge') entryType = 'document_charge';
+      } else if (
+        particularsLower.includes('disbursement') ||
+        accountNameLower === 'disbursement' ||
+        entryType === 'original_loan' ||
+        (accountNameLower === 'cd a/c' && entry.debit > 0 && !entry.credit)
+      ) {
+        entryType = 'original_loan';
+        particulars = 'Original Loan Disbursement';
+      }
+      return { ...entry, entry_type: entryType, particulars };
+    }
+
+    if (particularsLower.includes('disbursement') || (entry.debit > 0 && !entry.credit)) {
+      entryType = 'original_loan';
+      particulars = 'Original Loan Disbursement';
+    }
+
+    return { ...entry, entry_type: entryType, particulars };
+  });
 };
 
 const CDLedger: React.FC = () => {
@@ -56,7 +113,7 @@ const CDLedger: React.FC = () => {
       return true;
     });
   }, [loansList, statusFilter]);
-  
+
   // Custom Autocomplete Search State
   const [searchNameQuery, setSearchNameQuery] = useState('');
   const [searchAcQuery, setSearchAcQuery] = useState('');
@@ -65,29 +122,10 @@ const CDLedger: React.FC = () => {
   const [listSearchQuery, setListSearchQuery] = useState('');
 
   const [selectedLoan, setSelectedLoan] = useState<(FinanceLoan & { customer: FinanceCustomer; transactions: FinanceTransaction[]; photos: any[]; dues: FinanceDue[]; documents: FinanceDocument[] }) | null>(null);
-  
-  const [paymentDate, setPaymentDate] = useState(() => new Date().toISOString().split('T')[0]);
-  
-  // Edit mode details
-  const [isEditing, setIsEditing] = useState(false);
-  const [savingDetails, setSavingDetails] = useState(false);
 
-  // Edit fields: Customer details
-  const [editCustName, setEditCustName] = useState('');
-  const [editCustPhone, setEditCustPhone] = useState('');
-  const [editCustPhone2, setEditCustPhone2] = useState('');
-  const [editCustAddress, setEditCustAddress] = useState('');
-  const [editCustAadhaar, setEditCustAadhaar] = useState('');
-  const [editCustFatherName, setEditCustFatherName] = useState('');
-  const [editCustPartnerName, setEditCustPartnerName] = useState('');
-  
-  // Edit fields: Surety details
-  const [editSuretyName, setEditSuretyName] = useState('');
-  const [editSuretyPhone, setEditSuretyPhone] = useState('');
-  const [editSuretyAadhaar, setEditSuretyAadhaar] = useState('');
-  const [editSuretyAddress, setEditSuretyAddress] = useState('');
-  const [editSuretyRelation, setEditSuretyRelation] = useState('');
-  const [editLoanRemarks, setEditLoanRemarks] = useState('');
+  const [paymentDate, setPaymentDate] = useState(() => getLocalBusinessDateISO());
+
+
 
   // Upload document fields
   const [docType, setDocType] = useState('Pledge Document');
@@ -97,7 +135,7 @@ const CDLedger: React.FC = () => {
   const [showPrintPreview, setShowPrintPreview] = useState(false);
 
   // Return Document Modal State
-  const [returnDate, setReturnDate] = useState(new Date().toISOString().split('T')[0]);
+  const [returnDate, setReturnDate] = useState(() => getLocalBusinessDateISO());
   const [returnedTo, setReturnedTo] = useState('');
   const [returnRemarks, setReturnRemarks] = useState('');
   const [isReturningDoc, setIsReturningDoc] = useState(false);
@@ -112,7 +150,27 @@ const CDLedger: React.FC = () => {
   // Action Panel State
   const [totalAmountPaying, setTotalAmountPaying] = useState('');
   const [receiptNo, setReceiptNo] = useState('');
-  const [activeLogTab, setActiveLogTab] = useState<'statement' | 'interest'>('statement');
+  const [activeLogTab, setActiveLogTab] = useState<'statement' | 'interest' | 'payment' | 'editHistory'>('statement');
+  const [editLogs, setEditLogs] = useState<any[]>([]);
+  const [pendingReviews, setPendingReviews] = useState<any[]>([]);
+  const [loanTransactions, setLoanTransactions] = useState<any[]>([]);
+  const [showEditTxModal, setShowEditTxModal] = useState(false);
+  const [editingTx, setEditingTx] = useState<any | null>(null);
+  const [editTxReceiptNo, setEditTxReceiptNo] = useState('');
+  const [editTxDate, setEditTxDate] = useState('');
+  const [editTxAmount, setEditTxAmount] = useState('');
+  const [editTxReason, setEditTxReason] = useState('');
+  const [isSavingTx, setIsSavingTx] = useState(false);
+  const [expandedTxIds, setExpandedTxIds] = useState<Set<string>>(new Set());
+  const toggleExpandTx = (txId: string) => {
+    const newSet = new Set(expandedTxIds);
+    if (newSet.has(txId)) {
+      newSet.delete(txId);
+    } else {
+      newSet.add(txId);
+    }
+    setExpandedTxIds(newSet);
+  };
 
   // NPA Modal State
   const [showNpaModal, setShowNpaModal] = useState(false);
@@ -155,6 +213,12 @@ const CDLedger: React.FC = () => {
     setLoading(true);
     try {
       const allLoans = await supabaseFinance.getCDLoansList();
+      try {
+        const pending = await supabaseFinance.getTransactionReviews({ status: 'PENDING' });
+        setPendingReviews(pending || []);
+      } catch (err) {
+        console.error('Failed to fetch pending reviews:', err);
+      }
 
       // Show ONLY CD loans in CD Ledger
       const cdLoans = allLoans.filter((l: any) => l.loan_category === 'CD');
@@ -169,132 +233,100 @@ const CDLedger: React.FC = () => {
     }
   };
 
+  const [loadingTab, setLoadingTab] = useState(false);
+
+  const loadTabDetails = async (tab: 'statement' | 'interest' | 'payment' | 'editHistory', loanId: string) => {
+    setLoadingTab(true);
+    try {
+      if (tab === 'statement' || tab === 'interest') {
+        const [entries, interests] = await Promise.all([
+          supabaseFinance.getCDLedgerEntries(loanId),
+          supabaseFinance.getCDInterestDetails(loanId)
+        ]);
+
+        const normalizedEntries = normalizeCDLedgerEntries(entries || []);
+        setCdLedgerEntries(normalizedEntries);
+        setCdInterestDetails(interests || []);
+      } else if (tab === 'payment') {
+        const { data: txs } = await supabase
+          .from('finance_transactions')
+          .select('id, date, amount, type, remarks, collected_by, receipt_no')
+          .eq('loan_id', loanId)
+          .order('date', { ascending: true });
+        setLoanTransactions(txs || []);
+      } else if (tab === 'editHistory') {
+        const { data: editLogsData } = await supabase
+          .from('finance_cd_transaction_edit_logs')
+          .select('*')
+          .eq('loan_id', loanId)
+          .order('edited_at', { ascending: false });
+        setEditLogs(editLogsData || []);
+      }
+    } catch (err) {
+      console.error('Error loading tab details:', err);
+    } finally {
+      setLoadingTab(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedLoan?.id) {
+      loadTabDetails(activeLogTab, selectedLoan.id);
+    }
+  }, [activeLogTab, selectedLoan?.id]);
+
   const loadLedgerDetails = async (loanId: string) => {
     setLoading(true);
     try {
       const fullDetails = await supabaseFinance.getLoanById(loanId);
       if (fullDetails) {
         setSelectedLoan(fullDetails);
+
+
+
+        // Fetch remaining core details in parallel
+        const [
+          g1Res,
+          g2Res,
+          docsRes,
+          colLogsRes,
+          retDocsRes,
+          nextReceipt,
+          cdEntries,
+          cdInterests
+        ] = await Promise.all([
+          fullDetails.guarantor_1_id
+            ? supabase.from('finance_customers').select('id, name, phone, customer_photo_url, aadhaar, address').eq('id', fullDetails.guarantor_1_id).single()
+            : Promise.resolve({ data: null }),
+          fullDetails.guarantor_2_id
+            ? supabase.from('finance_customers').select('id, name, phone, customer_photo_url, aadhaar, address').eq('id', fullDetails.guarantor_2_id).single()
+            : Promise.resolve({ data: null }),
+          supabase.from('finance_loan_documents').select('*').eq('loan_id', loanId),
+          supabase.from('finance_edited_logs').select('*').eq('table_name', 'finance_loans_collateral').eq('record_id', loanId).order('edited_at', { ascending: false }).limit(1),
+          supabase.from('finance_documents_returned').select('*').eq('loan_id', loanId).order('created_at', { ascending: false }).limit(1),
+          supabaseFinance.getNextReceiptNumber(),
+          supabaseFinance.getCDLedgerEntries(loanId),
+          supabaseFinance.getCDInterestDetails(loanId)
+        ]);
+
+        setGuarantor1(g1Res.data || null);
+        setGuarantor2(g2Res.data || null);
+        setLoanDocuments(docsRes.data || []);
         
-        // Map edit fields
-        setEditCustName(fullDetails.customer?.name || '');
-        setEditCustPhone(fullDetails.customer?.phone || '');
-        setEditCustPhone2(fullDetails.customer?.phone2 || '');
-        setEditCustAddress(fullDetails.customer?.address || '');
-        setEditCustAadhaar(fullDetails.customer?.aadhaar || '');
-        setEditCustFatherName(fullDetails.customer?.father_husband_name || '');
-        setEditCustPartnerName(fullDetails.customer?.partner_name || '');
-
-        setEditSuretyName(fullDetails.surety_name || '');
-        setEditSuretyPhone(fullDetails.surety_phone || '');
-        setEditSuretyAadhaar(fullDetails.surety_aadhaar || '');
-        setEditSuretyAddress(fullDetails.surety_present_address || '');
-        setEditSuretyRelation(fullDetails.surety_relation || '');
-        setEditLoanRemarks(fullDetails.remarks || '');
-        
-        // Fetch explicit CD entries and interest rows
-        const entries = await supabaseFinance.getCDLedgerEntries(loanId);
-        const interests = await supabaseFinance.getCDInterestDetails(loanId);
-        
-        // Normalize legacy/native entries to prevent commission/charges from reducing dues.
-        // KEY RULE: Never reclassify a row whose entry_type is already interest_payment or penalty_payment.
-        // Only mark as opening_commission when: (a) DB type is opening_commission/Commission/document_charge,
-        // OR (b) receipt_no is '-' or null/missing (disbursement-time rows have no real receipt number).
-        const normalizedEntries = entries.map((entry: any) => {
-          let entryType = entry.entry_type;
-          let particulars = entry.particulars || '';
-          const accountNameLower = (entry.account_name || '').toLowerCase();
-          const particularsLower = particulars.toLowerCase();
-
-          // If native CD entry, keep particulars unchanged except for opening charges normalization
-          if (entry.account_name) {
-            if (accountNameLower === 'cd commission a/c') {
-              // Only treat as opening_commission if it was saved as such, or has no real receipt (disbursement row).
-              // Do NOT reclassify interest_payment rows - they have RC numbers and different entry_type.
-              const isOpeningRow = entryType === 'opening_commission' || entryType === 'Commission'
-                || (!entry.receipt_no || entry.receipt_no === '-');
-              if (isOpeningRow && entryType !== 'interest_payment' && entryType !== 'penalty_payment') {
-                entryType = 'opening_commission';
-                particulars = 'Opening CD Commission Charged';
-              }
-              // If entry_type is interest_payment or penalty_payment, leave completely unchanged
-            } else if (accountNameLower === 'cd document charges a/c') {
-              if (entryType !== 'document_charge') entryType = 'document_charge';
-            } else if (
-              particularsLower.includes('disbursement') ||
-              accountNameLower === 'disbursement' ||
-              entryType === 'original_loan' ||
-              (accountNameLower === 'cd a/c' && entry.debit > 0 && !entry.credit)
-            ) {
-              entryType = 'original_loan';
-              particulars = 'Original Loan Disbursement';
-            }
-            return { ...entry, entry_type: entryType, particulars };
-          }
-
-          // Fallback normalization for legacy/unsplit entries where account_name is null
-          if (particularsLower.includes('disbursement') || (entry.debit > 0 && !entry.credit)) {
-            entryType = 'original_loan';
-            particulars = 'Original Loan Disbursement';
-          }
-
-          return { ...entry, entry_type: entryType, particulars };
-        });
-        
-        setCdLedgerEntries(normalizedEntries);
-        setCdInterestDetails(interests);
-
-        // Fetch Guarantors if present from finance_customers
-        if (fullDetails.guarantor_1_id) {
-          const { data: g1 } = await supabase.from('finance_customers').select('*').eq('id', fullDetails.guarantor_1_id).single();
-          setGuarantor1(g1 || null);
-        } else {
-          setGuarantor1(null);
-        }
-        
-        if (fullDetails.guarantor_2_id) {
-          const { data: g2 } = await supabase.from('finance_customers').select('*').eq('id', fullDetails.guarantor_2_id).single();
-          setGuarantor2(g2 || null);
-        } else {
-          setGuarantor2(null);
-        }
-
-        // Fetch loan documents from finance_loan_documents
-        const { data: loanDocs } = await supabase
-          .from('finance_loan_documents')
-          .select('*')
-          .eq('loan_id', loanId);
-        setLoanDocuments(loanDocs || []);
-
-        // Fetch collateral logs from finance_edited_logs
-        const { data: colLogs } = await supabase
-          .from('finance_edited_logs')
-          .select('*')
-          .eq('table_name', 'finance_loans_collateral')
-          .eq('record_id', loanId)
-          .order('edited_at', { ascending: false })
-          .limit(1);
-        if (colLogs && colLogs.length > 0) {
-          setCollateralLog(colLogs[0].new_values);
+        if (colLogsRes.data && colLogsRes.data.length > 0) {
+          setCollateralLog(colLogsRes.data[0].new_values);
         } else {
           setCollateralLog(null);
         }
 
-        // Fetch returned document status
-        const { data: retDocs } = await supabase
-          .from('finance_documents_returned')
-          .select('*')
-          .eq('loan_id', loanId)
-          .order('created_at', { ascending: false })
-          .limit(1);
-        setDocumentReturned(retDocs && retDocs.length > 0 ? retDocs[0] : null);
-
-        // Set auto-generated receipt number (sequential)
-        const nextReceipt = await supabaseFinance.getNextReceiptNumber();
+        setDocumentReturned(retDocsRes.data && retDocsRes.data.length > 0 ? retDocsRes.data[0] : null);
         setReceiptNo(nextReceipt);
         setTotalAmountPaying('');
 
-        setIsEditing(false);
+        // Populate entries and interest details immediately on select/refresh
+        const normalizedEntries = normalizeCDLedgerEntries(cdEntries || []);
+        setCdLedgerEntries(normalizedEntries);
+        setCdInterestDetails(cdInterests || []);
       } else {
         toast.error('Ledger details could not be resolved');
       }
@@ -313,71 +345,183 @@ const CDLedger: React.FC = () => {
     }
   };
 
-  const handleToggleEdit = () => {
-    setIsEditing(!isEditing);
+  const handleOpenEditTxModal = (tx: any) => {
+    setEditingTx(tx);
+    setEditTxReceiptNo(tx.receipt_no || '');
+    setEditTxDate(tx.date ? new Date(tx.date).toISOString().split('T')[0] : '');
+    
+    setEditTxAmount(String(tx.amount || ''));
+    setEditTxReason('');
+    setShowEditTxModal(true);
   };
 
-  const handleSaveDetails = async () => {
-    if (!selectedLoan) return;
-    setSavingDetails(true);
+  const handleSaveEditTx = async () => {
+    if (!editingTx || !selectedLoan) return;
+    if (!editTxReceiptNo.trim() || !editTxDate || !editTxAmount || !editTxReason.trim()) {
+      toast.error('All required fields must be filled.');
+      return;
+    }
+    const amt = parseFloat(editTxAmount);
+    if (isNaN(amt) || amt <= 0) {
+      toast.error('Amount must be greater than 0.');
+      return;
+    }
+
+    setIsSavingTx(true);
     try {
-      const staffName = user?.username || 'Staff';
+      // 1. Check for duplicate receipt numbers for same loan (excluding current transaction)
+      const { data: dupTx, error: dupError } = await supabase
+        .from('finance_transactions')
+        .select('id')
+        .eq('loan_id', selectedLoan.id)
+        .eq('receipt_no', editTxReceiptNo.trim())
+        .neq('id', editingTx.id)
+        .maybeSingle();
+
+      if (dupError) throw dupError;
+      if (dupTx) {
+        toast.error(`Receipt number ${editTxReceiptNo.trim()} is already used for another transaction on this loan.`);
+        setIsSavingTx(false);
+        return;
+      }
+
+      // Prepare old and new data for audit log
+      const oldData = {
+        receipt_no: editingTx.receipt_no,
+        date: editingTx.date,
+        amount: editingTx.amount,
+        remarks: editingTx.remarks,
+        type: editingTx.type
+      };
+
+      const newData = {
+        receipt_no: editTxReceiptNo.trim(),
+        date: editTxDate,
+        amount: amt,
+        remarks: editingTx.remarks || '',
+        type: 'Collection'
+      };
+
+      // 2. Update transaction record
+      const { error: txUpdateError } = await supabase
+        .from('finance_transactions')
+        .update({
+          receipt_no: newData.receipt_no,
+          date: new Date(newData.date).toISOString(),
+          amount: newData.amount,
+          remarks: newData.remarks,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', editingTx.id);
+
+      if (txUpdateError) throw txUpdateError;
+
+      // 3. Log the edit audit
+      try {
+        const username = user?.username || 'Staff';
+        await supabase
+          .from('finance_cd_transaction_edit_logs')
+          .insert({
+            loan_id: selectedLoan.id,
+            transaction_id: editingTx.id,
+            old_data: oldData,
+            new_data: newData,
+            edited_by: username,
+            reason: editTxReason.trim()
+          });
+      } catch (logErr) {
+        console.error('Failed to write audit log:', logErr);
+      }
+
+      // 4. Run rebuild
+      const rebuildResult = await cdLedgerRebuildService.rebuildCDLoanLifecycle(selectedLoan.id, 'FULL_RECALCULATE');
+      if (!rebuildResult.success) {
+        throw new Error(rebuildResult.error || 'Rebuild failed');
+      }
+
+      toast.success('Transaction updated and loan rebuilt successfully');
+      setShowEditTxModal(false);
+      setEditingTx(null);
       
-      const customerPayload: Partial<FinanceCustomer> = {
-        name: editCustName,
-        phone: editCustPhone || null,
-        address: editCustAddress || null,
-        aadhaar: editCustAadhaar || null,
-        father_husband_name: editCustFatherName || null,
-      };
-
-      try {
-        customerPayload.phone2 = editCustPhone2 || null;
-        customerPayload.partner_name = editCustPartnerName || null;
-      } catch (err) {
-        console.warn('phone2 or partner_name could not be updated in payload', err);
-      }
-
-      const updatedCust = await supabaseFinance.updateCustomer(
-        selectedLoan.customer_id,
-        customerPayload,
-        staffName
-      );
-
-      const loanPayload: Partial<FinanceLoan> = {
-        surety_name: editSuretyName || null,
-        surety_phone: editSuretyPhone || null,
-        surety_aadhaar: editSuretyAadhaar || null,
-        remarks: editLoanRemarks || null,
-      };
-
-      try {
-        loanPayload.surety_present_address = editSuretyAddress || null;
-        loanPayload.surety_relation = editSuretyRelation || null;
-      } catch (err) {
-        console.warn('surety_present_address or surety_relation could not be updated in payload', err);
-      }
-
-      const updatedLoan = await supabaseFinance.updateLoan(
-        selectedLoan.id,
-        loanPayload,
-        staffName
-      );
-
-      if (updatedCust && updatedLoan) {
-        toast.success('Account details updated successfully!');
-        setIsEditing(false);
-        loadLedgerDetails(selectedLoan.id);
-      } else {
-        toast.error('Failed to save details. Verify database schemas.');
-      }
-    } catch (err) {
-      console.error(err);
-      toast.error('Error saving updates');
+      // Refresh details
+      await loadLedgerDetails(selectedLoan.id);
+    } catch (err: any) {
+      console.error('Error saving transaction edit:', err);
+      toast.error(err.message || 'Failed to edit transaction');
     } finally {
-      setSavingDetails(false);
+      setIsSavingTx(false);
     }
   };
+
+  const handleDeleteTx = async (tx: any) => {
+    if (!selectedLoan) return;
+    if (!user?.is_admin) {
+      toast.error('Only administrators can delete transactions.');
+      return;
+    }
+
+    const confirmDelete = window.confirm(`Are you sure you want to delete transaction ${tx.receipt_no || ''} of ₹${Number(tx.amount).toLocaleString('en-IN')}? This will completely rebuild the loan lifecycle.`);
+    if (!confirmDelete) return;
+
+    const reason = window.prompt('Please enter the reason for deleting this transaction (Mandatory):');
+    if (reason === null) return; // User cancelled prompt
+    if (!reason.trim()) {
+      toast.error('Delete reason is mandatory.');
+      return;
+    }
+
+    try {
+      // 1. Prepare log snapshot
+      const oldData = {
+        receipt_no: tx.receipt_no,
+        date: tx.date,
+        amount: tx.amount,
+        remarks: tx.remarks,
+        type: tx.type
+      };
+
+      // 2. Log audit log first (before deleting)
+      try {
+        const username = user?.username || 'Admin';
+        await supabase
+          .from('finance_cd_transaction_edit_logs')
+          .insert({
+            loan_id: selectedLoan.id,
+            transaction_id: tx.id,
+            old_data: oldData,
+            new_data: { status: 'Deleted' },
+            edited_by: username,
+            reason: reason.trim()
+          });
+      } catch (logErr) {
+        console.error('Failed to log delete audit:', logErr);
+      }
+
+      // 3. Delete transaction record
+      const { error: deleteError } = await supabase
+        .from('finance_transactions')
+        .delete()
+        .eq('id', tx.id);
+
+      if (deleteError) throw deleteError;
+
+      // 4. Run rebuild
+      const rebuildResult = await cdLedgerRebuildService.rebuildCDLoanLifecycle(selectedLoan.id, 'FULL_RECALCULATE');
+      if (!rebuildResult.success) {
+        throw new Error(rebuildResult.error || 'Rebuild failed');
+      }
+
+      toast.success('Transaction deleted and loan rebuilt successfully');
+      
+      // Refresh details
+      await loadLedgerDetails(selectedLoan.id);
+    } catch (err: any) {
+      console.error('Error deleting transaction:', err);
+      toast.error(err.message || 'Failed to delete transaction');
+    }
+  };
+
+
 
   const handleUploadDocument = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!selectedLoan) return;
@@ -387,7 +531,7 @@ const CDLedger: React.FC = () => {
     setUploadingDoc(true);
     try {
       const fileObj = new File([file], `doc-${selectedLoan.loan_id}-${Date.now()}-${file.name}`, { type: file.type });
-      
+
       const { data, error } = await supabase.storage
         .from('finance-photos')
         .upload(`documents/${fileObj.name}`, fileObj);
@@ -496,199 +640,24 @@ const CDLedger: React.FC = () => {
     }
   };
 
-  // ===== SINGLE SOURCE OF TRUTH: current principal balance =====
-  // Derived from cdLedgerEntries so that renewCalculations, ledgerMetrics,
-  // and all UI sections consume the exact same value.
-  const currentPrincipalBalance = useMemo(() => {
-    if (!selectedLoan) return Number(0);
 
-    // 1. Find original disbursement amount from ledger entries
-    const disbursementEntries = cdLedgerEntries.filter(
-      (e: any) => e.entry_type === 'original_loan' || e.entry_type === 'Disbursement'
-    );
-    const originalFromLedger = disbursementEntries.reduce(
-      (sum: number, e: any) => sum + Number(e.debit || 0), 0
-    );
-
-    // 2. Find total principal paid from ledger entries
-    const principalPaidFromLedger = cdLedgerEntries
-      .filter((e: any) => {
-        const isPrincipalPaid =
-          (e.particulars || '').toLowerCase().includes('principal paid') ||
-          (e.particulars || '').toLowerCase().includes('principal adjusted') ||
-          e.entry_type === 'principal_payment';
-        return isPrincipalPaid && Number(e.credit || 0) > 0;
-      })
-      .reduce((sum: number, e: any) => sum + Number(e.credit || 0), 0);
-
-    // 3. If we found disbursement entries, use ledger-derived value;
-    //    otherwise fall back to selectedLoan.amount (for loans without ledger history)
-    if (originalFromLedger > 0) {
-      return Number(Math.max(0, originalFromLedger - principalPaidFromLedger).toFixed(2));
-    }
-
-    // Fallback: use DB amount (already reduced by past payments)
-    return Number(selectedLoan.amount);
-  }, [selectedLoan, cdLedgerEntries]);
 
   // Dynamic calculations based on payment date and selected loan
   const renewCalculations = useMemo(() => {
-    if (!selectedLoan) return null;
-
-    const entryDate = new Date(selectedLoan.date);
-    const today = new Date(paymentDate);
-
-    // Original disbursement date (earliest disbursal entry or loan creation date)
-    const disbEntry = [...cdLedgerEntries]
-      .filter(e => e.entry_type === 'original_loan' || e.entry_type === 'Disbursement')
-      .sort((a, b) => startOfDay(a.entry_date) - startOfDay(b.entry_date))[0];
-    const originalLoanDateMs: number = disbEntry
-      ? startOfDay(disbEntry.entry_date)
-      : startOfDay(selectedLoan.date);
-
-    const originalLoanDate = new Date(originalLoanDateMs);
-
-    // Validate: payment date must not be before the original loan disbursement date
-    const isDateInvalid = startOfDay(today) < originalLoanDateMs;
-    if (isDateInvalid) {
-      return {
-        isDateInvalid: true,
-        daysCount: 0,
-        loanDate: originalLoanDate.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-        dueDate: null,
-        daysPastDue: 0,
-        daysRemaining: 0,
-        nextDueDate: null,
-        penaltyDays: 0,
-        interest: 0,
-        penalty: 0,
-        principal: currentPrincipalBalance,
-        grossInterest: 0,
-        grossPenalty: 0,
-        dailyInterest: 0,
-        dailyPenalty: 0,
-        penaltyPaid: 0,
-        interestPaid: 0,
-        principalPaid: 0
-      };
+    try {
+      return financeCalculationService.getCDAccountPosition(
+        selectedLoan,
+        cdLedgerEntries,
+        cdInterestDetails,
+        paymentDate
+      ) as any;
+    } catch (err: any) {
+      if (err.message && err.message.includes('CD_DATA_INTEGRITY_ERROR')) {
+        return { error: err.message } as any;
+      }
+      throw err;
     }
-
-    const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
-    
-    // Current Due Date = Loan Date + Period Days - 1
-    // VBA: DueDate = Date + Period − 1 (UpdatingDueDate.bas default path)
-    const entryDateStart = new Date(startOfDay(entryDate));
-    const dueDate = new Date(entryDateStart.getTime() + (periodDays - 1) * 24 * 60 * 60 * 1000);
-
-    // Dynamic Penalty Rate Lookup
-    const penaltyRate = selectedLoan.penalty_percent !== undefined && selectedLoan.penalty_percent !== null ? Number(selectedLoan.penalty_percent) : 0.75;
-
-    // Requirement 5: Debug logging
-    console.log('=== CD LEDGER RENEW CALCULATIONS DEBUG ===');
-    console.log('period_days:', periodDays);
-    console.log('loan_date:', selectedLoan.date);
-    console.log('due_date:', dueDate.toISOString().split('T')[0]);
-    console.log('calculated_cycle_days:', Math.round((dueDate.getTime() - entryDateStart.getTime()) / (1000 * 60 * 60 * 24)));
-    
-    // Due Days = Payment Date - Due Date (Clamped to 0)
-    const rawDueDays = Math.round((startOfDay(today) - startOfDay(dueDate)) / (1000 * 60 * 60 * 24));
-    const dueDays = Math.max(0, rawDueDays);
-    const daysRemaining = rawDueDays < 0 ? Math.abs(rawDueDays) : 0;
-    
-    const interestRate = Number(selectedLoan.interest_rate) || 3;
-    const principalBalance = currentPrincipalBalance;
-
-    // Interest = principal × rate × dueDays ÷ 30 ÷ 100 (0 if dueDays <= 0)
-    // Penalty  = principal × penaltyRate% × dueDays ÷ 30 (0 if dueDays <= 5, calculated on full dueDays count if > 5)
-    const grossInterest = dueDays <= 0 ? 0 : Number(((principalBalance * interestRate * dueDays) / 30 / 100).toFixed(2));
-    const penaltyDays = dueDays <= 5 ? 0 : dueDays;
-    const grossPenalty  = penaltyDays <= 0 ? 0 : Number(((principalBalance * penaltyRate * penaltyDays) / 30 / 100).toFixed(2));
-
-    // Daily interest / renewal day value:
-    // Derived from the Renewal Due divided by Period Days (cancels out to principal * rate / 100 / 30)
-    const renewalInterest = (principalBalance * (interestRate / 100) * periodDays) / 30;
-    const baseDailyInterest = Number((renewalInterest / periodDays).toFixed(5));
-
-    const renewalPenalty = (principalBalance * (penaltyRate / 100) * periodDays) / 30;
-    const baseDailyPenalty = Number((renewalPenalty / periodDays).toFixed(5));
-
-    let dailyInterest = baseDailyInterest;
-    let dailyPenalty = 0;
-    if (dueDays > 5) {
-      dailyInterest = Number((baseDailyInterest + baseDailyPenalty).toFixed(5));
-      dailyPenalty = baseDailyPenalty;
-    }
-
-    // ── BUGFIX: Determine the true current-cycle start from the ledger ──────────
-    // The start of the current cycle is exactly the loan date in selectedLoan.date.
-    // Any payments posted with entry_date on or after this start date belong to the current cycle.
-    const cycleStartDateMs = startOfDay(selectedLoan.date);
-
-    // Paid amounts for the current cycle:
-    const penaltyPaidInCycle = cdLedgerEntries
-      .filter(e => e.entry_type === 'penalty_payment' && startOfDay(e.entry_date) >= cycleStartDateMs)
-      .reduce((sum, e) => sum + Number(e.credit || 0), 0);
-
-    const interestPaidInCycle = cdLedgerEntries
-      .filter(e => e.entry_type === 'interest_payment' && startOfDay(e.entry_date) >= cycleStartDateMs)
-      .reduce((sum, e) => sum + Number(e.credit || 0), 0);
-
-    // ── OLD ACCESS VBA: effective gross & pending dues ────────────────────────────
-    // grossInterest can be NEGATIVE when loan is not yet due (credit).
-    // For payment/outstanding purposes, outstanding = max(0, gross - paid).
-    // For DISPLAY purposes, show the raw gross (including negative = credit).
-    //
-    // When gross is negative but there are payments in cycle, effectiveGross
-    // must be at least the paid amount so pending doesn't go negative.
-    const effectiveGrossInterest = grossInterest;
-    const effectiveGrossPenalty  = grossPenalty;
-
-    // Outstanding dues for PAYMENT purposes (never negative)
-    const outstandingInterest = Math.max(0, Number(grossInterest.toFixed(2)));
-    const outstandingPenalty  = Math.max(0, Number(grossPenalty.toFixed(2)));
-
-    // Display interest/penalty: show the raw formula value (never negative)
-    const displayInterest = dueDays <= 0 ? 0 : outstandingInterest;
-    const displayPenalty  = dueDays <= 0 ? 0 : outstandingPenalty;
-
-    // CD067 / CD070 debugging trace
-    console.log('=== CD LEDGER MIGRATION AUDIT TRACE ===', {
-      loan_number: selectedLoan.loan_id,
-      principal_balance: principalBalance,
-      due_days: dueDays,
-      interest_formula_result: grossInterest,
-      penalty_formula_result: grossPenalty,
-      interest_paid_considered: interestPaidInCycle,
-      penalty_paid_considered: penaltyPaidInCycle,
-      total_dues_result: outstandingInterest + outstandingPenalty
-    });
-
-    return {
-      isDateInvalid: false,
-      daysCount: dueDays,
-      loanDate: entryDate.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-      dueDate: dueDate,
-      daysPastDue: dueDays,            // raw due days (can be negative)
-      daysRemaining,                    // absolute days remaining (when not yet due)
-      nextDueDate: null,                // Computed dynamically based on renewedDays
-      penaltyDays,
-      interest: displayInterest,        // for display: negative when credit, pending when overdue
-      penalty: displayPenalty,          // for display: 0 when not due, pending when overdue
-      outstandingInterest,              // for payments: always >= 0
-      outstandingPenalty,               // for payments: always >= 0
-      principal: principalBalance,
-      grossInterest,                    // raw formula result (can be negative)
-      grossPenalty,                     // raw formula result (0 if dueDays <= 5)
-      effectiveGrossInterest,           // max(grossInterest, paid) — always >= paid
-      effectiveGrossPenalty,            // max(grossPenalty, paid) — always >= paid
-      dailyInterest,
-      dailyPenalty,
-      baseDailyInterest,               // pure interest daily rate (no penalty component)
-      penaltyPaid: penaltyPaidInCycle,
-      interestPaid: interestPaidInCycle,
-      principalPaid: 0
-    };
-  }, [selectedLoan, paymentDate, cdLedgerEntries, currentPrincipalBalance]);
+  }, [selectedLoan, paymentDate, cdLedgerEntries, cdInterestDetails]) as any;
 
   // Date Formatter helper (returns format e.g. 07-Mar-26)
   const formatDateOld = (dateStr: string | Date | number | null | undefined) => {
@@ -713,49 +682,20 @@ const CDLedger: React.FC = () => {
   // Statement ledger builder containing native logs + fallbacks (interest, document charges etc.)
   const displayedStatementEntries = useMemo(() => {
     if (!selectedLoan || !renewCalculations) return [];
-    
+
     const list: any[] = [];
     const sortedDbEntries = [...cdLedgerEntries].sort((a, b) => new Date(a.entry_date).getTime() - new Date(b.entry_date).getTime());
-    
-    // Find original loan start date
-    const disb = sortedDbEntries.find(e => e.entry_type === 'original_loan' || e.entry_type === 'Disbursement');
-    const originalLoanStart = startOfDay(disb ? disb.entry_date : selectedLoan.date);
-    
-    // Find all renewal dates
-    const cycleEnds = sortedDbEntries
-      .filter(e => 
-        e.entry_type === 'Renewal' || 
-        e.entry_type === 'Renew' || 
-        (e.particulars || '').toLowerCase().includes('renewal') || 
-        (e.particulars || '').toLowerCase().includes('renew')
-      )
-      .map(e => startOfDay(e.entry_date));
-    
-    const uniqueCycleEnds = Array.from(new Set(cycleEnds)).sort((a, b) => a - b);
-    
-    // Build the list of cycles
-    const cycles: { start: number; end: number; isCurrent: boolean }[] = [];
-    let currentStart = originalLoanStart;
-    for (const end of uniqueCycleEnds) {
-      if (end > currentStart) {
-        cycles.push({ start: currentStart, end, isCurrent: false });
-        currentStart = end;
-      }
-    }
-    cycles.push({ start: currentStart, end: startOfDay(paymentDate), isCurrent: true });
 
-    // Step-by-step simulation of cycles to determine running principal and split payments
     const principalPaidTotalDb = sortedDbEntries
       .filter(e => {
-        const isPrincipalPaid = (e.particulars || '').toLowerCase().includes('principal paid') || 
-                                (e.particulars || '').toLowerCase().includes('principal adjusted') ||
-                                e.entry_type === 'principal_payment';
+        const isPrincipalPaid = (e.particulars || '').toLowerCase().includes('principal paid') ||
+          (e.particulars || '').toLowerCase().includes('principal adjusted') ||
+          e.entry_type === 'principal_payment';
         return e.account_name === 'CD A/C' && isPrincipalPaid;
       })
       .reduce((sum, e) => sum + Number(e.credit || 0), 0);
-    
+
     const originalAmount = Number(selectedLoan.amount) + principalPaidTotalDb;
-    let runningPrincipal = originalAmount;
 
     // Let's first add the Disbursement row
     const hasDisbursement = sortedDbEntries.some(e => e.entry_type === 'original_loan' || e.entry_type === 'Disbursement');
@@ -776,7 +716,6 @@ const CDLedger: React.FC = () => {
     }
 
     // Check if we have CD Commission opening row in the DB.
-    // IMPORTANT: check by entry_type, not by account name — interest_payment rows also use CD COMMISSION A/C.
     const hasCommission = sortedDbEntries.some(e =>
       e.entry_type === 'opening_commission' || e.entry_type === 'Commission'
     );
@@ -810,6 +749,7 @@ const CDLedger: React.FC = () => {
       e.entry_type === 'document_charge'
     );
     if (!hasDocCharges && docChargesVal > 0) {
+      const disb = sortedDbEntries.find(e => e.entry_type === 'original_loan' || e.entry_type === 'Disbursement');
       list.push({
         id: `fallback-doc-${selectedLoan.id}`,
         loan_id: selectedLoan.id,
@@ -821,166 +761,28 @@ const CDLedger: React.FC = () => {
         particulars: 'Document Charges Collected',
         user_name: 'System',
         entry_type: 'document_charge',
-        entry_date: selectedLoan.date
+        entry_date: disb ? disb.entry_date : selectedLoan.date
       });
     }
 
-    // Process each cycle
-    cycles.forEach((cycle) => {
-      // Find all payments inside this cycle
-      const cyclePayments = sortedDbEntries.filter(entry => {
-        const isNonPaymentEntry =
-          entry.entry_type === 'original_loan' || entry.entry_type === 'Disbursement' ||
-          entry.entry_type === 'Document Charges' || entry.entry_type === 'document_charge' ||
-          entry.entry_type === 'Commission' || entry.entry_type === 'opening_commission';
-        if (isNonPaymentEntry) {
-          return false;
-        }
-        const isPayment = entry.credit > 0 &&
-                          !isNonPaymentEntry &&
-                          !entry.id.toString().startsWith('fallback-comm-') &&
-                          !entry.id.toString().startsWith('fallback-doc-');
-        if (!isPayment) return false;
-        
-        const d = startOfDay(entry.entry_date);
-        
-        const isFirstCycle = cycle.start === originalLoanStart;
-        if (isFirstCycle) {
-          return d >= cycle.start && d <= cycle.end;
-        } else {
-          return d > cycle.start && d <= cycle.end;
-        }
-      });
-
-      // Dues calculation for this cycle
-      // VBA: DueDate = Date + Period − 1
-      const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
-      const cycleDueDate = new Date(cycle.start + (periodDays - 1) * 24 * 60 * 60 * 1000);
-      const cycleDueDays = Math.max(0, Math.round((cycle.end - startOfDay(cycleDueDate)) / (1000 * 60 * 60 * 24)));
-      
-      const interestRate = Number(selectedLoan.interest_rate) || 3;
-      const penaltyRate = selectedLoan.penalty_percent !== undefined && selectedLoan.penalty_percent !== null ? Number(selectedLoan.penalty_percent) : 0.75;
-      
-      const cycleGrossInterest = cycleDueDays <= 0 ? 0 : Number(((runningPrincipal * interestRate * cycleDueDays) / 30 / 100).toFixed(2));
-      const cycleGrossPenalty = cycleDueDays <= 0 ? 0 : Number(((runningPrincipal * penaltyRate * cycleDueDays) / 30 / 100).toFixed(2));
-
-      // Check if some payments inside this cycle are ALREADY split
-      const alreadySplitSum = cyclePayments.filter(e => {
-        const isPrincipalPaid = (e.particulars || '').toLowerCase().includes('principal paid') || 
-                                (e.particulars || '').toLowerCase().includes('principal adjusted') ||
-                                e.entry_type === 'principal_payment';
-        const isAlreadySplit = ['penalty a/c', 'cd commission a/c'].includes((e.account_name || '').toLowerCase()) || 
-                               e.entry_type === 'penalty_payment' ||
-                               e.entry_type === 'interest_payment' ||
-                               e.entry_type === 'principal_payment' ||
-                               ((e.account_name || '').toLowerCase() === 'cd a/c' && isPrincipalPaid);
-        return isAlreadySplit;
-      }).reduce((sum, e) => sum + Number(e.credit), 0);
-
-      let accumulatedPayments = alreadySplitSum;
-
-      // Now map each payment entry in the cycle
-      cyclePayments.forEach(entry => {
-        const isPrincipalPaid = (entry.particulars || '').toLowerCase().includes('principal paid') || 
-                               (entry.particulars || '').toLowerCase().includes('principal adjusted') ||
-                               entry.entry_type === 'principal_payment';
-        const isAlreadySplit = ['penalty a/c', 'cd commission a/c'].includes((entry.account_name || '').toLowerCase()) || 
-                               entry.entry_type === 'penalty_payment' ||
-                               entry.entry_type === 'interest_payment' ||
-                               entry.entry_type === 'principal_payment' ||
-                               ((entry.account_name || '').toLowerCase() === 'cd a/c' && isPrincipalPaid);
-
-        if (isAlreadySplit) {
-          list.push({ ...entry, account_name: entry.account_name || 'CD A/C' });
-          if (((entry.account_name || '').toLowerCase() === 'cd a/c' && isPrincipalPaid) || entry.entry_type === 'principal_payment') {
-            runningPrincipal -= Number(entry.credit);
-          }
-          return;
-        }
-
-        const isRenewal = entry.entry_type === 'Renewal' || entry.entry_type === 'Renew' || 
-                          (entry.particulars || '').toLowerCase().includes('renewal') || 
-                          (entry.particulars || '').toLowerCase().includes('renew');
-        const isCloseAction = entry.entry_type === 'Close' || entry.entry_type === 'Settlement';
-        const actionType = isCloseAction ? 'Close' : (isRenewal ? 'Renew' : 'Partial');
-        const creditAmt = Number(entry.credit || 0);
-
-        const monthlyInterestVal = Number((runningPrincipal * interestRate / 100).toFixed(2));
-
-        const oldSplit = financeCalculationService.computeCDPaymentSplit(
-          accumulatedPayments,
-          cycleGrossPenalty,
-          cycleGrossInterest,
-          monthlyInterestVal,
-          runningPrincipal,
-          actionType,
-          periodDays
-        );
-        const newSplit = financeCalculationService.computeCDPaymentSplit(
-          accumulatedPayments + creditAmt,
-          cycleGrossPenalty,
-          cycleGrossInterest,
-          monthlyInterestVal,
-          runningPrincipal,
-          actionType,
-          periodDays
-        );
-
-        const pPaid = Number((newSplit.penaltyPaid - oldSplit.penaltyPaid).toFixed(2));
-        const iPaid = Number((newSplit.interestPaid - oldSplit.interestPaid).toFixed(2));
-        const prPaid = Number((newSplit.principalPaid - oldSplit.principalPaid).toFixed(2));
-
-        accumulatedPayments += creditAmt;
-        runningPrincipal -= prPaid;
-
-        const actionText = actionType === 'Renew'
-          ? 'Renewal Completed'
-          : (actionType === 'Close' ? 'Close' : 'Partial Payment');
-        const rNum = entry.receipt_no ? ` - ${entry.receipt_no}` : '';
-
-        if (pPaid > 0) {
-          list.push({
-            ...entry,
-            id: `${entry.id}-penalty`,
-            account_name: 'PENALTY A/C',
-            credit: pPaid,
-            particulars: `Penalty Paid - ${actionText}${rNum}`
-          });
-        }
-        if (iPaid > 0) {
-          list.push({
-            ...entry,
-            id: `${entry.id}-interest`,
-            account_name: 'CD COMMISSION A/C',
-            credit: iPaid,
-            particulars: `Interest Paid - ${actionText}${rNum}`
-          });
-        }
-        if (prPaid > 0) {
-          list.push({
-            ...entry,
-            id: `${entry.id}-principal`,
-            account_name: 'CD A/C',
-            credit: prPaid,
-            particulars: `Principal Adjusted - ${actionText}${rNum}`
-          });
-        }
-      });
-    });
-
-    // Pushes non-payment database entries directly (opening rows that are immutable)
+    // Push all database entries directly (both payment and non-payment)
+    // The canonical engine handles all mathematics, UI simply displays stored facts.
     sortedDbEntries.forEach(entry => {
-      const isNonPayment =
-        entry.entry_type === 'original_loan' || entry.entry_type === 'Disbursement' ||
-        entry.entry_type === 'Document Charges' || entry.entry_type === 'document_charge' ||
-        entry.entry_type === 'Commission' || entry.entry_type === 'opening_commission' ||
-        entry.entry_type === 'NPA_CLOSE' || entry.entry_type === 'NPA_CLOSED';
-      if (isNonPayment) {
-        list.push({ ...entry, account_name: entry.account_name || 'CD A/C' });
-      }
+      list.push({ ...entry, account_name: entry.account_name || 'CD A/C' });
     });
 
-    return list.sort((a, b) => new Date(a.entry_date).getTime() - new Date(b.entry_date).getTime());
+    return list.sort((a, b) => {
+      const dateA = new Date(a.entry_date).getTime();
+      const dateB = new Date(b.entry_date).getTime();
+      if (dateA !== dateB) return dateA - dateB;
+
+      const isAmtA = a.entry_type === 'amount_paid';
+      const isAmtB = b.entry_type === 'amount_paid';
+      if (isAmtA && !isAmtB) return -1;
+      if (!isAmtA && isAmtB) return 1;
+
+      return 0;
+    });
   }, [selectedLoan, cdLedgerEntries, paymentDate]);
 
   // Original Loan Amount calculations
@@ -1000,13 +802,142 @@ const CDLedger: React.FC = () => {
   // Principal Paid calculations
   const principalPaidTotal = useMemo(() => {
     return displayedStatementEntries
-      .filter(e => 
+      .filter(e =>
         e.entry_type === 'principal_payment' ||
-        (e.particulars || '').toLowerCase().includes('principal paid') || 
+        (e.particulars || '').toLowerCase().includes('principal paid') ||
         (e.particulars || '').toLowerCase().includes('principal adjusted')
       )
       .reduce((sum, e) => sum + Number(e.credit), 0);
   }, [displayedStatementEntries]);
+
+  // Grouped payment entries for receipt-centric statement reports (Change 6, 8, 9, 10, 11, 12, 13)
+  const groupedPayments = useMemo(() => {
+    if (!selectedLoan) return [];
+
+    const nonOpening = displayedStatementEntries.filter(e => 
+      e.entry_type !== 'original_loan' && 
+      e.entry_type !== 'opening_commission' && 
+      e.entry_type !== 'document_charge' &&
+      (e.account_name || '').toLowerCase() !== 'cd document charges a/c' &&
+      e.entry_type !== 'Disbursement' &&
+      e.entry_type !== 'Commission' &&
+      e.entry_type !== 'Document Charges'
+    );
+
+    const groups: { [key: string]: any[] } = {};
+    const noReceiptEntries: any[] = [];
+
+    nonOpening.forEach(entry => {
+      if (entry.receipt_no && entry.receipt_no !== '-') {
+        if (!groups[entry.receipt_no]) {
+          groups[entry.receipt_no] = [];
+        }
+        groups[entry.receipt_no].push(entry);
+      } else {
+        noReceiptEntries.push(entry);
+      }
+    });
+
+    const rows: any[] = [];
+
+    Object.keys(groups).forEach(receiptNo => {
+      const groupEntries = groups[receiptNo];
+      const firstEntry = groupEntries[0];
+
+      const amountPaidEntry = groupEntries.find(e => e.entry_type === 'amount_paid');
+      const totalAmountPaid = amountPaidEntry ? Number(amountPaidEntry.credit) : 
+        groupEntries.reduce((sum, e) => {
+          const isAllocation = ['PENALTY A/C', 'CD COMMISSION A/C', 'CD A/C'].includes((e.account_name || '').toUpperCase()) || 
+            ['penalty_payment', 'interest_payment', 'principal_payment'].includes(e.entry_type);
+          return sum + (isAllocation ? Number(e.credit || 0) : 0);
+        }, 0);
+
+      const interestPaid = groupEntries
+        .filter(e => (e.account_name || '').toUpperCase() === 'CD COMMISSION A/C' || e.entry_type === 'interest_payment')
+        .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+
+      const penaltyPaid = groupEntries
+        .filter(e => (e.account_name || '').toUpperCase() === 'PENALTY A/C' || e.entry_type === 'penalty_payment')
+        .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+
+      const principalPaid = groupEntries
+        .filter(e => (e.account_name || '').toUpperCase() === 'CD A/C' || e.entry_type === 'principal_payment')
+        .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+
+      const matchingInt = cdInterestDetails.find(d => d.receipt_no === receiptNo && (Number(d.renewed_days) > 0 || d.renewed_till_date));
+      const renewedDays = matchingInt ? Number(matchingInt.renewed_days) : 0;
+      const renewedTill = matchingInt ? matchingInt.renewed_till_date : null;
+
+      const date = firstEntry.entry_date;
+      const user = firstEntry.user_name || 'Staff';
+
+      let particulars = 'Payment';
+      const isRenewal = groupEntries.some(e => 
+        e.entry_type === 'Renewal' || e.entry_type === 'Renew' || 
+        (e.particulars || '').toLowerCase().includes('renewal') ||
+        (e.particulars || '').toLowerCase().includes('renew')
+      );
+      const isClose = groupEntries.some(e => e.entry_type === 'Close' || e.entry_type === 'Settlement' || (e.particulars || '').toLowerCase().includes('close'));
+      if (isClose) {
+        particulars = 'Close Account';
+      } else if (isRenewal) {
+        particulars = 'Renewal Payment';
+      } else if (principalPaid > 0) {
+        particulars = 'Principal Payment';
+      } else {
+        particulars = 'Interest Payment';
+      }
+
+      rows.push({
+        receipt_no: receiptNo,
+        date,
+        amountPaid: totalAmountPaid,
+        interest: interestPaid,
+        penalty: penaltyPaid,
+        principal: principalPaid,
+        particulars,
+        daysRenewed: renewedDays,
+        renewedTill: renewedTill,
+        user
+      });
+    });
+
+    noReceiptEntries.forEach(entry => {
+      const isDebit = Number(entry.debit) > 0;
+      const amount = isDebit ? Number(entry.debit) : Number(entry.credit);
+      rows.push({
+        receipt_no: '-',
+        date: entry.entry_date,
+        amountPaid: isDebit ? 0 : amount,
+        interest: 0,
+        penalty: 0,
+        principal: isDebit ? amount : 0,
+        particulars: entry.particulars || (isDebit ? 'Debit Entry' : 'Credit Entry'),
+        daysRenewed: 0,
+        renewedTill: null,
+        user: entry.user_name || 'Staff'
+      });
+    });
+
+    return rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }, [displayedStatementEntries, cdInterestDetails, selectedLoan]);
+
+  const statementTotals = useMemo(() => {
+    const t = {
+      amountPaid: 0,
+      interest: 0,
+      penalty: 0,
+      principal: 0,
+      documentCharges: Number(selectedLoan?.document_charges) || 0
+    };
+    groupedPayments.forEach(row => {
+      t.amountPaid += row.amountPaid || 0;
+      t.interest += row.interest || 0;
+      t.penalty += row.penalty || 0;
+      t.principal += row.principal || 0;
+    });
+    return t;
+  }, [groupedPayments, selectedLoan]);
 
   const displayedInterestDetails = useMemo(() => {
     const list: any[] = [];
@@ -1015,10 +946,10 @@ const CDLedger: React.FC = () => {
     displayedStatementEntries.forEach(entry => {
       const isInterestOrPenalty = ['penalty a/c', 'cd commission a/c'].includes((entry.account_name || '').toLowerCase());
       if (isInterestOrPenalty && entry.credit > 0 && entry.entry_type !== 'opening_commission' && entry.entry_type !== 'Commission' && !entry.id.toString().startsWith('fallback-comm-')) {
-        
+
         // Find matching interest detail row from Supabase table
-        const matchingDetail = cdInterestDetails.find(d => 
-          d.entry_id === entry.id || 
+        const matchingDetail = cdInterestDetails.find(d =>
+          d.entry_id === entry.id ||
           d.ledger_entry_id === entry.id ||
           (d.receipt_no === entry.receipt_no && d.row_type === (entry.account_name === 'PENALTY A/C' ? 'penalty_payment' : 'interest_payment'))
         );
@@ -1049,8 +980,8 @@ const CDLedger: React.FC = () => {
 
     cdInterestDetails.forEach(detail => {
       if ((detail.particulars || '').toLowerCase().includes('note:')) {
-        let renewed_days = Number(detail.renewed_days) || 0;
-        let renewed_till_date = detail.renewed_till_date;
+        const renewed_days = Number(detail.renewed_days) || 0;
+        const renewed_till_date = detail.renewed_till_date;
 
         list.push({
           ...detail,
@@ -1065,7 +996,7 @@ const CDLedger: React.FC = () => {
 
   // Shared single source of truth calculations
   const ledgerMetrics = useMemo(() => {
-    if (!selectedLoan || !renewCalculations) {
+    if (!selectedLoan || !renewCalculations || renewCalculations.error) {
       return {
         originalPrincipal: 0,
         principalPaid: 0,
@@ -1076,6 +1007,7 @@ const CDLedger: React.FC = () => {
         paidPenalty: 0,
         pendingInterest: 0,
         pendingPenalty: 0,
+        todayDue: 0,
         renewalDue: 0,
         currentTotalDues: 0,
         currentPaidDues: 0,
@@ -1089,33 +1021,21 @@ const CDLedger: React.FC = () => {
 
     const originalPrincipal = originalLoanAmount;
     const principalPaid = principalPaidTotal;
-    const principalBalance = Number((originalPrincipal - principalPaid).toFixed(2));
+    
+    // Direct consumption from production calculator (renewCalculations)
+    const principalBalance = renewCalculations.principalBalance;
+    const pendingInterest = renewCalculations.accruedInterest;
+    const pendingPenalty = renewCalculations.accruedPenalty;
+    const todayDue = renewCalculations.todayDue;
+    const renewalDue = renewCalculations.totalRenewal; // matches renewalAmount
+    const totalToRegularize = renewCalculations.totalToRegularize;
+    const totalClose = renewCalculations.totalForClose;
 
     const grossInterestDue = renewCalculations.effectiveGrossInterest || 0;
     const grossPenaltyDue = renewCalculations.effectiveGrossPenalty || 0;
 
     const paidInterest = renewCalculations.interestPaid || 0;
     const paidPenalty = renewCalculations.penaltyPaid || 0;
-
-    // Display values (can be negative when loan is not yet due)
-    const pendingInterest = renewCalculations.interest || 0;
-    const pendingPenalty = renewCalculations.penalty || 0;
-
-
-    // Outstanding values for payment purposes (always >= 0)
-
-    const interestRate = Number(selectedLoan.interest_rate) || 3;
-    const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
-    const renewalDue = Number(((principalBalance * (interestRate / 100) * periodDays) / 30).toFixed(2));
-
-    const outstandingInterest = renewCalculations.outstandingInterest || 0;
-    const outstandingPenalty = renewCalculations.outstandingPenalty || 0;
-    const totalDue = outstandingInterest + outstandingPenalty;
-
-    // Total To Regularize = total_due + total_for_renewal (if there are active dues)
-    const totalToRegularize = (outstandingInterest === 0 && outstandingPenalty === 0)
-      ? 0
-      : Number((totalDue + renewalDue).toFixed(2));
 
     // Footer metrics synchronized with calculations and card values
     const currentTotalDues = (renewCalculations.daysPastDue || 0) <= 0
@@ -1126,12 +1046,9 @@ const CDLedger: React.FC = () => {
       : Number((paidInterest + paidPenalty).toFixed(2));
     const currentPendingDues = Math.max(0, Number((currentTotalDues - currentPaidDues).toFixed(2)));
 
-    // Close Amount = Principal + Interest + Penalty (only when interest and penalty are non-negative)
-    const totalClose = Number((principalBalance + Math.max(0, pendingInterest) + Math.max(0, pendingPenalty)).toFixed(2));
-
     // totalCredit = only real cash collected (interest, penalty, principal payments)
     // Must NOT include opening_commission or document_charge rows (not real collections)
-    const NON_COLLECTION_TYPES = new Set(['original_loan', 'Disbursement', 'opening_commission', 'Commission', 'Document Charges', 'document_charge']);
+    const NON_COLLECTION_TYPES = new Set(['original_loan', 'Disbursement', 'opening_commission', 'Commission', 'Document Charges', 'document_charge', 'amount_paid']);
     const totalCredit = displayedStatementEntries
       .filter(e => !NON_COLLECTION_TYPES.has(e.entry_type) && Number(e.credit) > 0)
       .reduce((sum, e) => sum + Number(e.credit || 0), 0);
@@ -1150,6 +1067,7 @@ const CDLedger: React.FC = () => {
       paidPenalty,
       pendingInterest,
       pendingPenalty,
+      todayDue,
       renewalDue,
       currentTotalDues,
       currentPaidDues,
@@ -1163,8 +1081,12 @@ const CDLedger: React.FC = () => {
 
   // Calculation bottom totals
   const bottomTotals = useMemo(() => {
-    const totalCredit = displayedStatementEntries.reduce((sum, e) => sum + Number(e.credit || 0), 0);
-    const totalDebit = displayedStatementEntries.reduce((sum, e) => sum + Number(e.debit || 0), 0);
+    const totalCredit = displayedStatementEntries
+      .filter(e => e.entry_type !== 'amount_paid')
+      .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+    const totalDebit = displayedStatementEntries
+      .filter(e => e.entry_type !== 'amount_paid')
+      .reduce((sum, e) => sum + Number(e.debit || 0), 0);
     return {
       totalCredit,
       totalDebit,
@@ -1181,8 +1103,6 @@ const CDLedger: React.FC = () => {
     if (paymentAmount <= 0 || !renewCalculations) return null;
 
     const principalBefore = ledgerMetrics.principalBalance;
-    const outstandingPenalty = renewCalculations.outstandingPenalty || 0;
-    const outstandingInterest = renewCalculations.outstandingInterest || 0;
 
     const periodDays = (selectedLoan?.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
     const interestRate = Number(selectedLoan?.interest_rate) || 3;
@@ -1192,20 +1112,20 @@ const CDLedger: React.FC = () => {
     const isClosingPayment = paymentAmount >= Math.max(0, ledgerMetrics.totalClose);
 
     if (isClosingPayment) {
-      const penaltyPaid = outstandingPenalty;
-      const overdueInterestPaid = outstandingInterest;
-      const renewalInterestPaid = 0;
-      const principalPaid = Number(Math.max(0, paymentAmount - penaltyPaid - overdueInterestPaid).toFixed(2));
-      const principalAfter = Number(Math.max(0, principalBefore - principalPaid).toFixed(2));
-      
+      const closeSplit = allocateCDPayment(
+        renewCalculations as any,
+        paymentAmount,
+        'Close',
+        periodDays
+      );
       const details = {
-        penaltyPaid,
-        overdueInterestPaid,
-        renewalInterestPaid,
-        interestPaid: overdueInterestPaid + renewalInterestPaid,
-        principalPaid,
-        principalAfter,
-        renewedDays: 0,
+        penaltyPaid: closeSplit.penaltyPaid,
+        overdueInterestPaid: closeSplit.overdueInterestPaid,
+        renewalInterestPaid: closeSplit.renewalInterestPaid,
+        interestPaid: closeSplit.interestPaid,
+        principalPaid: closeSplit.principalPaid,
+        principalAfter: Number(Math.max(0, principalBefore - closeSplit.principalPaid).toFixed(2)),
+        renewedDays: closeSplit.renewedDays,
         nextDueDate: null,
         dailyInterestValue
       };
@@ -1219,22 +1139,18 @@ const CDLedger: React.FC = () => {
     }
 
     // Renew Option (Option 1)
-    const renewSplit = financeCalculationService.computeCDPaymentSplit(
+    const renewSplit = allocateCDPayment(
+      renewCalculations as any,
       paymentAmount,
-      outstandingPenalty,
-      outstandingInterest,
-      monthlyInterest,
-      principalBefore,
       'Renew',
       periodDays
     );
     // VBA: NextDueDate = DueDate + RDAYS — always extends from old DueDate, not payment date
-    const renewBaseDateMs = renewCalculations?.dueDate
-      ? startOfDay(renewCalculations.dueDate)
-      : startOfDay(paymentDate);
-    const renewNextDueDate = renewSplit.renewedDays > 0 
-      ? new Date(renewBaseDateMs + renewSplit.renewedDays * 24 * 60 * 60 * 1000) 
+    const renewBaseDateStr = renewCalculations?.dueDateStr || paymentDate;
+    const renewNextDueDateStr = renewSplit.renewedDays > 0
+      ? financeCalculationService.addCalendarDays(renewBaseDateStr, renewSplit.renewedDays)
       : null;
+    const renewNextDueDate = renewNextDueDateStr ? new Date(renewNextDueDateStr) : null;
 
     const renewDetails = {
       penaltyPaid: renewSplit.penaltyPaid,
@@ -1249,19 +1165,17 @@ const CDLedger: React.FC = () => {
     };
 
     // Partial Option (Option 2)
-    const partialSplit = financeCalculationService.computeCDPaymentSplit(
+    const partialSplit = allocateCDPayment(
+      renewCalculations as any,
       paymentAmount,
-      outstandingPenalty,
-      outstandingInterest,
-      monthlyInterest,
-      principalBefore,
       'Partial',
       periodDays
     );
-    const partialBaseDateMs = Math.max(startOfDay(renewCalculations?.dueDate || paymentDate), startOfDay(paymentDate));
-    const partialNextDueDate = partialSplit.renewedDays > 0 
-      ? new Date(partialBaseDateMs + partialSplit.renewedDays * 24 * 60 * 60 * 1000) 
+    const partialBaseDateStr = renewCalculations?.dueDateStr || paymentDate;
+    const partialNextDueDateStr = partialSplit.renewedDays > 0
+      ? financeCalculationService.addCalendarDays(partialBaseDateStr, partialSplit.renewedDays)
       : null;
+    const partialNextDueDate = partialNextDueDateStr ? new Date(partialNextDueDateStr) : null;
 
     const partialDetails = {
       penaltyPaid: partialSplit.penaltyPaid,
@@ -1414,101 +1328,106 @@ const CDLedger: React.FC = () => {
   const handleActionSubmit = async (actionType: 'Renew' | 'Partial' | 'Close') => {
     if (isRenewing) return;
     if (!selectedLoan || !renewCalculations) return;
-    
+    if (renewCalculations.error) {
+      toast.error('Cannot submit payment due to account data chronology error.');
+      return;
+    }
+
     // Block if payment date is before loan date
     if (renewCalculations.isDateInvalid) {
       toast.error('Payment date cannot be before loan date.');
       return;
     }
-    
+
     const amount = Number(totalAmountPaying) || 0;
     if (actionType !== 'Close' && (amount <= 0 || isNaN(amount))) {
       toast.error('Enter a valid payment amount.');
       return;
     }
 
-    // Validation for Partial Payment principal bounds
+    // Validation for Partial Payment bounds
     if (actionType === 'Partial') {
-      const principal = ledgerMetrics.principalBalance || 0;
-      if (amount >= principal) {
-        toast.error(`Partial Payment amount (₹${amount.toFixed(2)}) must be strictly less than the outstanding principal balance (₹${principal.toFixed(2)}). To close the loan, please use Close Account.`);
+      const totalToRegularize = ledgerMetrics.totalToRegularize || 0;
+      if (amount < totalToRegularize) {
+        toast.error(`Partial Payment amount (₹${amount.toFixed(2)}) must be greater than or equal to the total to regularize amount (₹${totalToRegularize.toFixed(2)}).`);
         return;
       }
-    }
-
-    // Operator Warning/Confirmation when outstanding dues exist during Partial Payment
-    const outstandingPenalty = renewCalculations.outstandingPenalty || 0;
-    const outstandingInterest = renewCalculations.outstandingInterest || 0;
-    if (actionType === 'Partial' && (outstandingPenalty > 0 || outstandingInterest > 0)) {
-      const totalOutstanding = outstandingPenalty + outstandingInterest;
-      const confirmMsg = `WARNING: There are outstanding dues of ₹${totalOutstanding.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (Interest: ₹${outstandingInterest.toLocaleString('en-IN', { minimumFractionDigits: 2 })}, Penalty: ₹${outstandingPenalty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}).\n\nMaking a Partial Payment will reduce the Principal Balance ONLY.\nIt will NOT pay off outstanding interest/penalty, NOT extend the due date, and NOT reset the accrual cycle.\n\nAre you sure you want to proceed with this Principal Reduction Only payment?`;
-      if (!window.confirm(confirmMsg)) {
+      const totalClose = ledgerMetrics.totalClose || 0;
+      if (amount >= totalClose) {
+        toast.error(`Partial Payment amount (₹${amount.toFixed(2)}) must be strictly less than the total close amount (₹${totalClose.toFixed(2)}). To close the loan, please use Close Account.`);
         return;
       }
     }
 
     const dueDays = renewCalculations.daysPastDue || 0;
+    // Operator Warning/Confirmation when outstanding dues exist during Partial Payment
+    if (actionType === 'Partial') {
+      const totalOutstanding = (renewCalculations.outstandingPenalty || 0) + (renewCalculations.outstandingInterest || 0);
+      const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
+
+      const split = allocateCDPayment(renewCalculations, amount, 'Partial', periodDays);
+
+      let confirmMsg = '';
+      if (amount >= totalOutstanding) {
+        confirmMsg = `You are making a Partial Payment of ₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}. This will pay off the outstanding dues of ₹${totalOutstanding.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (Interest: ₹${(renewCalculations.outstandingInterest || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}, Penalty: ₹${(renewCalculations.outstandingPenalty || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}) and reduce the Principal Balance by ₹${split.principalPaid.toLocaleString('en-IN', { minimumFractionDigits: 2 })}.\n\nThe loan's due date will be extended to the payment date (${formatDateOld(paymentDate)}).\n\nDo you want to proceed?`;
+      } else {
+        confirmMsg = `WARNING: The payment amount ₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })} is less than the total outstanding dues of ₹${totalOutstanding.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (Interest: ₹${(renewCalculations.outstandingInterest || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}, Penalty: ₹${(renewCalculations.outstandingPenalty || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}).\n\nNo principal reduction will occur. Instead, this payment will renew the loan by ${split.renewedDays} days.\n\nDo you want to proceed?`;
+      }
+      if (!window.confirm(confirmMsg)) {
+        return;
+      }
+    }
 
     setIsRenewing(true);
     try {
       // Snapshot variables before saving
       const principalBefore = ledgerMetrics.principalBalance;
       const paymentAmount = Number(amount.toFixed(2));
+      const disbEntry = cdLedgerEntries.find(e => e.entry_type === 'original_loan');
 
       // ===== PRIORITY ALLOCATION: Penalty → Interest → Principal =====
       let penaltyPaid = 0;
       let interestPaid = 0;
       let principalPaid = 0;
       let renewedDays = 0;
-
-      // Use OUTSTANDING (always >= 0) for payment allocation, not display values
-      const outstandingPenalty = renewCalculations.outstandingPenalty || 0;
-      const outstandingInterest = renewCalculations.outstandingInterest || 0;
-
-      const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
-      const interestRate = Number(selectedLoan?.interest_rate) || 3;
-      const monthlyInterest = Number(((principalBefore * (interestRate / 100) * periodDays) / 30).toFixed(2));
-
-      const isClosingPayment = actionType === 'Close' || paymentAmount >= Math.max(0, ledgerMetrics.totalClose);
-
       let overdueInterestPaid = 0;
       let renewalInterestPaid = 0;
 
-      if (isClosingPayment) {
-        // Close: clear all remaining dues, excess reduces principal
-        penaltyPaid   = outstandingPenalty;
-        overdueInterestPaid = outstandingInterest;
-        renewalInterestPaid = 0;
-        interestPaid  = outstandingInterest;
-        principalPaid = Number(Math.max(0, paymentAmount - penaltyPaid - overdueInterestPaid).toFixed(2));
-        renewedDays   = 0;
-      } else {
-        const split = financeCalculationService.computeCDPaymentSplit(
-          paymentAmount,
-          outstandingPenalty,
-          outstandingInterest,
-          monthlyInterest,
-          principalBefore,
-          actionType,
-          periodDays
-        );
-        penaltyPaid   = split.penaltyPaid;
-        overdueInterestPaid = split.overdueInterestPaid;
-        renewalInterestPaid = split.renewalInterestPaid;
-        interestPaid  = split.interestPaid;
-        principalPaid = split.principalPaid;
-        renewedDays   = split.renewedDays;
-      }
+      const periodDays = (selectedLoan.period_days && Number(selectedLoan.period_days) > 0) ? Number(selectedLoan.period_days) : 30;
+
+      const isClosingPayment = actionType === 'Close' || paymentAmount >= Math.max(0, ledgerMetrics.totalClose);
+
+      const split = allocateCDPayment(
+        renewCalculations as any,
+        paymentAmount,
+        isClosingPayment ? 'Close' : actionType,
+        periodDays
+      );
+      penaltyPaid = split.penaltyPaid;
+      overdueInterestPaid = split.overdueInterestPaid;
+      renewalInterestPaid = split.renewalInterestPaid;
+      interestPaid = split.interestPaid;
+      principalPaid = split.principalPaid;
+      renewedDays = split.renewedDays;
 
       let renewedTillDate: string | null = null;
       if (renewedDays > 0) {
-        // VBA: NextDueDate = DueDate + RDAYS — always extends from old DueDate
-        const baseDateMs = renewCalculations?.dueDate
-          ? startOfDay(renewCalculations.dueDate)
-          : startOfDay(paymentDate);
-        const nextDueDate = new Date(baseDateMs + renewedDays * 24 * 60 * 60 * 1000);
-        const tzoffset = nextDueDate.getTimezoneOffset() * 60000;
-        renewedTillDate = new Date(nextDueDate.getTime() - tzoffset).toISOString().split('T')[0];
+        const originalLoanDateStr = (disbEntry ? disbEntry.entry_date : selectedLoan.date).split('T')[0];
+        const baseDueDateStr = financeCalculationService.addCalendarDays(originalLoanDateStr, periodDays - 1);
+
+        // Sum total renewed days up to now (excluding current payment)
+        const prevTotalRenewedDays = cdInterestDetails
+          .filter(d => Number(d.credit) === 0)
+          .reduce((sum, d) => sum + (Number(d.renewed_days) || 0), 0);
+
+        // Add new renewed days to find the new exact total renewed days
+        const newTotalRenewedDays = financeCalculationService.advanceExactRenewalPosition(prevTotalRenewedDays, renewedDays);
+
+        // Convert exact total renewed days to display days
+        const nextDisplayDays = financeCalculationService.calculateDisplayDays(newTotalRenewedDays);
+
+        // Calculate display-rounded renewed till date
+        renewedTillDate = financeCalculationService.addCalendarDays(baseDueDateStr, nextDisplayDays);
       }
 
       // Console logs for debugging
@@ -1518,14 +1437,14 @@ const CDLedger: React.FC = () => {
       console.log('dueDays:', dueDays);
       console.log('renewedDays:', renewedDays);
       console.log('renewedTillDate:', renewedTillDate);
-       console.log('penaltyPaid:', penaltyPaid);
-       console.log('interestPaid:', interestPaid);
-       console.log('overdueInterestPaid:', overdueInterestPaid);
-       console.log('renewalInterestPaid:', renewalInterestPaid);
-       console.log('principalPaid:', principalPaid);
+      console.log('penaltyPaid:', penaltyPaid);
+      console.log('interestPaid:', interestPaid);
+      console.log('overdueInterestPaid:', overdueInterestPaid);
+      console.log('renewalInterestPaid:', renewalInterestPaid);
+      console.log('principalPaid:', principalPaid);
       console.log('principalBefore:', principalBefore);
       console.log('principalAfter:', Number((principalBefore - principalPaid).toFixed(2)));
-      
+
       const res = await supabaseFinance.postCdLedgerPayment({
         loanId: selectedLoan.id,
         customerId: selectedLoan.customer_id,
@@ -1540,47 +1459,48 @@ const CDLedger: React.FC = () => {
         receiptNo,
         renewedTillDate
       });
-      
+
       if (!res.success) {
         throw new Error(res.error || 'Failed to post ledger entries');
       }
-      
+
       const totalForClose = ledgerMetrics.totalClose;
 
       if (actionType === 'Close' || paymentAmount >= totalForClose) {
-        const { error: closeError } = await supabase.from('finance_loans').update({ 
+        const { error: closeError } = await supabase.from('finance_loans').update({
           status: 'Closed',
           amount: Math.max(0, Number((principalBefore - principalPaid).toFixed(2)))
         }).eq('id', selectedLoan.id);
         if (closeError) throw closeError;
       } else {
         const updates: any = {};
-        
+
         // For renewal/partial: set loan date based on next_due_date = base_date + renewed_days
         // Loan start date = next_due_date - periodDays
         // VBA: NextDueDate = DueDate + RDAYS — always extends from old DueDate
         if (renewedDays > 0) {
-          const baseDateMs = renewCalculations?.dueDate
-            ? startOfDay(renewCalculations.dueDate)
-            : startOfDay(paymentDate);
-          const nextDueDate = new Date(baseDateMs + renewedDays * 24 * 60 * 60 * 1000);
-          
-          console.log('=== RENEWAL DUE DATE ADVANCEMENT DEBUG ===');
-          console.log('old_current_due_date:', renewCalculations.dueDate);
-          console.log('payment_date:', paymentDate);
-          console.log('base_date:', new Date(baseDateMs));
-          console.log('interest_paid:', interestPaid);
-          console.log('monthly_interest:', monthlyInterest);
-          console.log('renewed_days:', renewedDays);
-          console.log('next_due_date:', nextDueDate);
+          const baseDateStr = renewCalculations?.dueDateStr || paymentDate;
+          const originalLoanDateStr = (disbEntry ? disbEntry.entry_date : selectedLoan.date).split('T')[0];
+          const baseDueDateStr = financeCalculationService.addCalendarDays(originalLoanDateStr, periodDays - 1);
+          const prevTotalRenewedDays = cdInterestDetails
+            .filter(d => Number(d.credit) === 0)
+            .reduce((sum, d) => sum + (Number(d.renewed_days) || 0), 0);
+          const newTotalRenewedDays = financeCalculationService.advanceExactRenewalPosition(prevTotalRenewedDays, renewedDays);
+          const nextDisplayDays = financeCalculationService.calculateDisplayDays(newTotalRenewedDays);
+          const nextDueDateStr = financeCalculationService.addCalendarDays(baseDueDateStr, nextDisplayDays);
 
-          const newCycleStart = new Date(nextDueDate.getTime() - periodDays * 24 * 60 * 60 * 1000);
-          const tzoffset = newCycleStart.getTimezoneOffset() * 60000;
-          updates.date = new Date(newCycleStart.getTime() - tzoffset).toISOString().split('T')[0];
-          
-          console.log('new_loan_date (updates.date):', updates.date);
+          console.log('=== RENEWAL DUE DATE ADVANCEMENT DEBUG ===');
+          console.log('old_current_due_date:', baseDateStr);
+          console.log('payment_date:', paymentDate);
+          console.log('base_date:', baseDateStr);
+          console.log('interest_paid:', interestPaid);
+          console.log('renewed_days:', renewedDays);
+          console.log('next_due_date:', nextDueDateStr);
+
+          // Removed updates.date assignment to keep finance_loans.date permanently immutable.
+          console.log('next_due_date calculated for local flow:', nextDueDateStr);
         }
-        
+
         if (principalPaid > 0) {
           updates.amount = Math.max(0, Number((principalBefore - principalPaid).toFixed(2)));
         }
@@ -1590,7 +1510,7 @@ const CDLedger: React.FC = () => {
           if (updateError) throw updateError;
         }
       }
-      
+
       setTotalAmountPaying('');
       await fetchLedgerData();
       await loadLedgerDetails(selectedLoan.id);
@@ -1600,7 +1520,7 @@ const CDLedger: React.FC = () => {
       } else {
         toast.success(`Payment applied — ${renewedDays} days renewed`);
       }
-    } catch(e: any) {
+    } catch (e: any) {
       console.error(e);
       toast.error(e?.message || 'Error applying payment');
     } finally {
@@ -1617,13 +1537,13 @@ const CDLedger: React.FC = () => {
       const closedBy = (user?.username || 'Staff').toUpperCase();
       const npaReceiptNo = await supabaseFinance.getNextReceiptNumber();
       const cleanNpaReason = npaReason.trim().toUpperCase();
-      
+
       const updatedRemarks = `${selectedLoan.remarks || ''}\n[NPA CLOSED AT ${npaClosedDate} BY ${closedBy} WITH SETTLEMENT AMOUNT: ${npaClosedAmount}]`.trim().toUpperCase();
-      
+
       const { error: loanError } = await supabase.from('finance_loans')
-        .update({ 
-          status: 'NPA_CLOSED', 
-          npa_closed: true, 
+        .update({
+          status: 'NPA_CLOSED',
+          npa_closed: true,
           amount: selectedLoan.amount,
           remarks: updatedRemarks
         })
@@ -1681,7 +1601,7 @@ const CDLedger: React.FC = () => {
       await loadLedgerDetails(selectedLoan.id);
       toast.success('NPA Account closed and settlement recorded.');
       setShowNpaModal(false);
-    } catch(e) {
+    } catch (e) {
       console.error(e);
       toast.error('Error settling NPA account');
     } finally {
@@ -1732,7 +1652,7 @@ const CDLedger: React.FC = () => {
       await loadLedgerDetails(selectedLoan.id);
       toast.success('Documents returned successfully.');
       setShowReturnDocModal(false);
-    } catch(e) {
+    } catch (e) {
       console.error(e);
       toast.error('Error recording document return');
     } finally {
@@ -1746,17 +1666,21 @@ const CDLedger: React.FC = () => {
       return;
     }
 
-    const exportData = displayedStatementEntries.map((tx: any) => ({
-      Date: formatDateOld(tx.entry_date),
-      Account: tx.account_name || 'CD A/C',
-      Credit: tx.credit,
-      Debit: tx.debit,
-      Particulars: tx.particulars || '',
-      User: tx.user_name || '',
-      'Receipt No': tx.receipt_no || '-'
-    }));
+    const exportData = displayedStatementEntries.map((tx: any) => {
+      const isPayment = isPaymentCollectionEntry(tx);
+      return {
+        Date: formatDateOld(tx.entry_date),
+        Account: tx.account_name || 'CD A/C',
+        'CR Amount': isPayment ? tx.credit : 0,
+        Credit: isPayment ? 0 : tx.credit,
+        Debit: isPayment ? 0 : tx.debit,
+        Particulars: tx.particulars || '',
+        User: tx.user_name || '',
+        'Receipt No': tx.receipt_no || '-'
+      };
+    });
 
-    const filename = `${selectedLoan.loan_id}_CD_Ledger_${new Date().toISOString().split('T')[0]}`;
+    const filename = `${selectedLoan.loan_id}_CD_Ledger_${getLocalBusinessDateISO()}`;
 
     if (format === 'xlsx') {
       const res = exportToExcel(exportData, filename, 'Transactions');
@@ -1783,24 +1707,24 @@ const CDLedger: React.FC = () => {
 
   return (
     <>
-      <div className={`space-y-6 p-6 max-w-7xl mx-auto ${showPrintPreview ? 'print:hidden' : 'print:p-0'}`}>
-        
+      <div className={`space-y-3.5 p-3.5 pt-2 max-w-7xl mx-auto ${showPrintPreview ? 'print:hidden' : 'print:p-0'}`}>
+
         {/* Top row: unified search and metadata header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm print:hidden">
-          
+
           {/* Top Left: Today's date and navigation */}
           <div className="flex flex-wrap items-center gap-3">
             <div>
               <label className="finance-caption uppercase block mb-1">Today's Date / Payment Date</label>
-              <input 
+              <input
                 type="date"
                 value={paymentDate}
                 onChange={(e) => setPaymentDate(e.target.value)}
                 disabled={selectedLoan?.status === 'Closed' || selectedLoan?.status === 'NPA_CLOSED'}
-                className={`bg-white border rounded-xl p-2 text-gray-800 focus:ring-2 focus:outline-none finance-input h-[42px] ${renewCalculations?.isDateInvalid ? 'border-red-400 focus:ring-red-400' : 'border-gray-200 focus:ring-green-500'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                className={`bg-white border rounded-xl p-2 text-gray-800 focus:ring-2 focus:outline-none finance-input h-[42px] ${(renewCalculations?.isDateInvalid || renewCalculations?.error) ? 'border-red-400 focus:ring-red-400' : 'border-gray-200 focus:ring-green-500'} disabled:opacity-50 disabled:cursor-not-allowed`}
               />
             </div>
-            
+
             <div>
               <label className="finance-caption uppercase block mb-1">Status Filter</label>
               <select
@@ -1847,7 +1771,7 @@ const CDLedger: React.FC = () => {
                 />
                 <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3.5" />
               </div>
-              
+
               {showNameDropdown && nameSuggestions.length > 0 && (
                 <div className="absolute z-50 w-full bg-white border border-gray-200 rounded-xl shadow-lg mt-1 max-h-60 overflow-y-auto">
                   {nameSuggestions.map(loan => (
@@ -1889,7 +1813,7 @@ const CDLedger: React.FC = () => {
                 />
                 <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3.5" />
               </div>
-              
+
               {showAcDropdown && acSuggestions.length > 0 && (
                 <div className="absolute z-50 w-full bg-white border border-gray-200 rounded-xl shadow-lg mt-1 max-h-60 overflow-y-auto">
                   {acSuggestions.map(loan => (
@@ -1949,11 +1873,11 @@ const CDLedger: React.FC = () => {
               const q = listSearchQuery.toLowerCase().trim();
               const filtered = q
                 ? filteredLoansList.filter(loan =>
-                    loan.loan_id.toLowerCase().includes(q) ||
-                    (loan.customer?.name || '').toLowerCase().includes(q) ||
-                    (loan.customer?.phone || '').includes(q) ||
-                    (loan.customer?.aadhaar || '').includes(q)
-                  )
+                  loan.loan_id.toLowerCase().includes(q) ||
+                  (loan.customer?.name || '').toLowerCase().includes(q) ||
+                  (loan.customer?.phone || '').includes(q) ||
+                  (loan.customer?.aadhaar || '').includes(q)
+                )
                 : filteredLoansList;
 
               if (filtered.length === 0) {
@@ -2002,12 +1926,11 @@ const CDLedger: React.FC = () => {
                           <td className="px-6 py-3.5 text-gray-600">{loan.interest_rate}%</td>
                           <td className="px-6 py-3.5 text-gray-500 text-xs">{loan.date ? new Date(loan.date + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '-'}</td>
                           <td className="px-6 py-3.5">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                              loan.status === 'Active' ? 'bg-green-100 text-green-700'
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${loan.status === 'Active' ? 'bg-green-100 text-green-700'
                               : loan.status === 'Closed' ? 'bg-gray-100 text-gray-500'
-                              : loan.status === 'NPA_CLOSED' ? 'bg-orange-100 text-orange-700'
-                              : 'bg-yellow-100 text-yellow-700'
-                            }`}>
+                                : loan.status === 'NPA_CLOSED' ? 'bg-orange-100 text-orange-700'
+                                  : 'bg-yellow-100 text-yellow-700'
+                              }`}>
                               {(loan.status || 'Active').toUpperCase()}
                             </span>
                           </td>
@@ -2025,7 +1948,7 @@ const CDLedger: React.FC = () => {
         ) : (
           <>
             {/* Workspace Header Hub */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm print:hidden">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-3 rounded-2xl border border-gray-100 shadow-sm print:hidden">
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   onClick={() => { setSelectedLoan(null); setListSearchQuery(''); }}
@@ -2036,24 +1959,23 @@ const CDLedger: React.FC = () => {
                 </button>
                 <div className="h-6 w-px bg-gray-200 hidden sm:block"></div>
                 <div>
-                  <h2 className="text-lg font-extrabold text-slate-950 flex items-center gap-2">
+                  <h2 className="text-xl font-black text-slate-955 flex items-center gap-2">
                     {selectedLoan.customer?.name}
-                    <span className="text-sm font-mono text-slate-900 font-black bg-slate-100 px-2.5 py-0.5 rounded-lg">A/C: {selectedLoan.loan_id}</span>
+                    <span className="text-[17px] font-mono text-slate-900 font-bold bg-slate-100 px-3 py-1 rounded-lg">A/C: {selectedLoan.loan_id}</span>
                   </h2>
                 </div>
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  selectedLoan.status === 'Active' ? 'bg-green-100 text-green-700'
+                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[13px] font-bold ${selectedLoan.status === 'Active' ? 'bg-green-100 text-green-700'
                   : selectedLoan.status === 'Closed' ? 'bg-gray-100 text-gray-500'
-                  : selectedLoan.status === 'NPA_CLOSED' ? 'bg-orange-100 text-orange-700'
-                  : 'bg-yellow-100 text-yellow-700'
-                }`}>
+                    : selectedLoan.status === 'NPA_CLOSED' ? 'bg-orange-100 text-orange-700'
+                      : 'bg-yellow-100 text-yellow-700'
+                  }`}>
                   {(selectedLoan.status || 'Active').toUpperCase()}
                 </span>
               </div>
 
               <div className="flex items-center gap-3 self-end sm:self-auto font-sans">
-                <span className="text-xs text-slate-800 uppercase tracking-wider font-extrabold">
-                  Record: <span className="text-gray-750 font-black">{currentIndex + 1}</span> of <span className="text-gray-750 font-black">{filteredLoansList.length}</span>
+                <span className="text-[14px] text-slate-800 uppercase tracking-wider font-bold">
+                  Record: <span className="text-slate-955 font-black">{currentIndex + 1}</span> of <span className="text-slate-955 font-black">{filteredLoansList.length}</span>
                 </span>
                 <div className="flex gap-1">
                   <button
@@ -2070,711 +1992,834 @@ const CDLedger: React.FC = () => {
                     className="p-2 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
                     title="Next Record"
                   >
-                    <ChevronRight className="w-4 h-4 text-gray-655" />
+                    <ChevronRight className="w-4 h-4 text-gray-650" />
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* Workspace Profile Cards Layout (Row 1: Borrower & Guarantors, Row 2: Photos & Documents) */}
-            <div className="space-y-6 print:hidden">
-              {/* Row 1: Borrower and Guarantor Details (3 Columns) */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {/* Card 1: Customer Details */}
-                <div className="bg-white rounded-3xl border border-gray-100 p-5 shadow-sm hover:shadow-md transition-all duration-200 relative flex flex-col justify-between min-h-[220px]">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <div>
-                      <span className="text-xs uppercase font-extrabold text-slate-900 tracking-wider block">Customer Details</span>
-                      <span className="text-[10px] text-slate-500 font-bold block">Borrower Info</span>
-                    </div>
-                    <Button 
-                      onClick={isEditing ? handleSaveDetails : handleToggleEdit} 
-                      variant={isEditing ? "success" : "secondary"}
-                      size="xs"
-                      icon={isEditing ? Save : Edit2}
-                      disabled={savingDetails || selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
-                      className="scale-90 border-0"
-                    >
-                      {isEditing ? 'Save' : 'Edit'}
-                    </Button>
-                  </div>
-                  <div className="flex-1">
-                    {isEditing ? (
-                      <div className="space-y-2 text-xs">
-                        <Input label="Name" value={editCustName} onChange={setEditCustName} className="scale-90 origin-top-left" />
-                        <Input label="S/o W/o" value={editCustFatherName} onChange={setEditCustFatherName} className="scale-90 origin-top-left" />
-                        <Input label="Address" value={editCustAddress} onChange={setEditCustAddress} className="scale-90 origin-top-left" />
-                        <Input label="Phone 1" value={editCustPhone} onChange={setEditCustPhone} className="scale-90 origin-top-left" />
-                        <Input label="Phone 2" value={editCustPhone2} onChange={setEditCustPhone2} className="scale-90 origin-top-left" />
-                        <Input label="Aadhaar" value={editCustAadhaar} onChange={setEditCustAadhaar} className="scale-90 origin-top-left" />
-                        <Input label="Partner" value={editCustPartnerName} onChange={setEditCustPartnerName} className="scale-90 origin-top-left" />
+            {/* Workspace Profile Cards Layout (Compacted Profiles with Photos Side-by-Side) */}
+            {(() => {
+              const borrowerPhotoUrl = selectedLoan.customer?.customer_photo_url || selectedLoan.customer_photo_url;
+              const guarantor1PhotoUrl = guarantor1?.photo_url || guarantor1?.customer_photo_url || selectedLoan.surety_photo_url;
+              const guarantor2PhotoUrl = guarantor2?.photo_url || guarantor2?.customer_photo_url;
+
+              return (
+                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm print:hidden overflow-hidden">
+                  <div className="grid grid-cols-3 divide-x divide-gray-100">
+
+                    {/* BORROWER column */}
+                    <div className="p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[13px] font-bold uppercase text-slate-500 tracking-wider">Borrower</span>
                       </div>
-                    ) : (
-                      <div className="space-y-2 text-xs text-gray-700">
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Name:</span>
-                          <span className="text-xs font-black text-black">{selectedLoan.customer?.name}</span>
+
+                      <div className="flex gap-2.5 items-start">
+                        <div className="w-12 h-14 shrink-0 rounded-lg bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center shadow-sm">
+                          {borrowerPhotoUrl ? (
+                            <img src={borrowerPhotoUrl} alt="Borrower" className="w-full h-full object-cover" />
+                          ) : (
+                            <User className="w-5 h-5 text-gray-300" />
+                          )}
                         </div>
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">S/o W/o:</span>
-                          <span className="text-xs font-black text-black">{selectedLoan.customer?.father_husband_name || 'N/A'}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-extrabold text-[16px] text-slate-900 leading-tight truncate">{selectedLoan.customer?.name}</div>
+                          <div className="text-[14px] text-slate-500 leading-tight truncate">{selectedLoan.customer?.father_husband_name || '—'}</div>
+                          <div className="text-[14px] font-semibold text-slate-700 mt-0.5">☎ {selectedLoan.customer?.phone || 'N/A'}{selectedLoan.customer?.phone2 ? ` / ${selectedLoan.customer.phone2}` : ''}</div>
+                          <div className="text-[14px] font-mono text-slate-600 mt-0.5">{selectedLoan.customer?.aadhaar || 'No Aadhaar'}</div>
+                          <div className="text-[14px] text-slate-500 truncate" title={selectedLoan.customer?.address || undefined}>{selectedLoan.customer?.address || 'No address'}</div>
                         </div>
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Phone 1:</span>
-                          <span className="text-xs font-black text-black">{selectedLoan.customer?.phone || 'N/A'}</span>
+                      </div>
+                    </div>
+
+                    {/* GUARANTOR 1 column */}
+                    <div className="p-3">
+                      <div className="text-[13px] font-bold uppercase text-slate-500 tracking-wider mb-2">Guarantor 1</div>
+                      {guarantor1 ? (
+                        <div className="flex gap-2.5 items-start">
+                          <div className="w-12 h-14 shrink-0 rounded-lg bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center shadow-sm">
+                            {guarantor1PhotoUrl ? (
+                              <img src={guarantor1PhotoUrl} alt="Guarantor 1" className="w-full h-full object-cover" />
+                            ) : (
+                              <User className="w-5 h-5 text-gray-300" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-extrabold text-[16px] text-slate-900 leading-tight truncate">{guarantor1.name}</div>
+                            <div className="text-[14px] font-semibold text-slate-700 mt-0.5">☎ {guarantor1.phone || 'N/A'}</div>
+                            <div className="text-[14px] font-mono text-slate-600 mt-0.5">{guarantor1.aadhaar || 'No Aadhaar'}</div>
+                            <div className="text-[14px] text-slate-500 truncate" title={guarantor1.address || undefined}>{guarantor1.address || 'No address'}</div>
+                          </div>
                         </div>
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Phone 2:</span>
-                          <span className="text-xs font-black text-black">{selectedLoan.customer?.phone2 || 'N/A'}</span>
+                      ) : (
+                        <div className="flex items-center justify-center h-14 text-[14px] text-slate-400 italic">No guarantor added</div>
+                      )}
+                    </div>
+
+                    {/* GUARANTOR 2 column */}
+                    <div className="p-3">
+                      <div className="text-[13px] font-bold uppercase text-slate-500 tracking-wider mb-2">Guarantor 2</div>
+                      {guarantor2 ? (
+                        <div className="flex gap-2.5 items-start">
+                          <div className="w-12 h-14 shrink-0 rounded-lg bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center shadow-sm">
+                            {guarantor2PhotoUrl ? (
+                              <img src={guarantor2PhotoUrl} alt="Guarantor 2" className="w-full h-full object-cover" />
+                            ) : (
+                              <User className="w-5 h-5 text-gray-300" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-extrabold text-[16px] text-slate-900 leading-tight truncate">{guarantor2.name}</div>
+                            <div className="text-[14px] font-semibold text-slate-700 mt-0.5">☎ {guarantor2.phone || 'N/A'}</div>
+                            <div className="text-[14px] font-mono text-slate-600 mt-0.5">{guarantor2.aadhaar || 'No Aadhaar'}</div>
+                            <div className="text-[14px] text-slate-500 truncate" title={guarantor2.address || undefined}>{guarantor2.address || 'No address'}</div>
+                          </div>
                         </div>
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Aadhaar:</span>
-                          <span className="text-xs font-black text-black font-mono">{selectedLoan.customer?.aadhaar || 'N/A'}</span>
-                        </div>
-                        <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Partner:</span>
-                          <span className="text-xs font-black text-black">{selectedLoan.customer?.partner_name || 'N/A'}</span>
-                        </div>
-                        <div className="flex flex-col border-b border-gray-50 pb-1.5">
-                          <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Address:</span>
-                          <span className="text-xs font-black text-black leading-tight mt-1">{selectedLoan.customer?.address || 'N/A'}</span>
-                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center h-14 text-[14px] text-slate-400 italic">No guarantor added</div>
+                      )}
+                    </div>
+
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ========== COMPACT OPERATOR WORKSPACE — FIRST VIEWPORT ========== */}
+            <div className="grid grid-cols-12 gap-3 print:hidden">
+
+              {/* LEFT BLOCK (8 cols): Inputs + Loan Details + Action Buttons */}
+              <div className="col-span-8">
+                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden h-full flex flex-col">
+
+                  {/* Card micro-header */}
+                  <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-100">
+                    <span className="text-[14px] font-bold uppercase text-slate-800 tracking-wider">Operator Action &amp; Calculations</span>
+                    {renewCalculations?.error ? (
+                      <div className="flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-2 py-1 text-red-700 font-semibold text-[12px]">
+                        <ShieldAlert className="w-3.5 h-3.5 shrink-0 text-red-600" />
+                        <span>Timeline Chronology Error</span>
+                      </div>
+                    ) : renewCalculations?.isDateInvalid && (
+                      <div className="flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-2 py-1 text-red-700 font-semibold text-[12px]">
+                        <ShieldAlert className="w-3.5 h-3.5 shrink-0 text-red-600" />
+                        <span>Payment date before loan date ({renewCalculations.loanDate})</span>
                       </div>
                     )}
                   </div>
-                </div>
 
-                {/* Card 2: Guarantor 1 */}
-                <div className="bg-white rounded-3xl border border-gray-100 p-5 shadow-sm hover:shadow-md transition-all duration-200 relative flex flex-col justify-between min-h-[220px]">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <div>
-                      <span className="text-xs uppercase font-extrabold text-slate-900 tracking-wider block">Guarantor 1</span>
-                      <span className="text-[10px] text-slate-500 font-bold block">Surety Profile</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 space-y-2 text-xs text-gray-700">
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Name:</span>
-                      <span className="text-xs font-black text-black">{guarantor1?.name || 'N/A'}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Phone No:</span>
-                      <span className="text-xs font-black text-black">{guarantor1?.phone || 'N/A'}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Aadhaar:</span>
-                      <span className="text-xs font-black text-black font-mono">{guarantor1?.aadhaar || 'N/A'}</span>
-                    </div>
-                  </div>
-                </div>
+                  <div className="p-3 flex flex-col gap-3.5 flex-1">
 
-                {/* Card 3: Guarantor 2 */}
-                <div className="bg-white rounded-3xl border border-gray-100 p-5 shadow-sm hover:shadow-md transition-all duration-200 relative flex flex-col justify-between min-h-[220px]">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <div>
-                      <span className="text-xs uppercase font-extrabold text-slate-900 tracking-wider block">Guarantor 2</span>
-                      <span className="text-[10px] text-slate-500 font-bold block">Secondary Surety</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 space-y-2 text-xs text-gray-700">
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Name:</span>
-                      <span className="text-xs font-black text-black">{guarantor2?.name || 'N/A'}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Phone No:</span>
-                      <span className="text-xs font-black text-black">{guarantor2?.phone || 'N/A'}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Aadhaar:</span>
-                      <span className="text-xs font-black text-black font-mono">{guarantor2?.aadhaar || 'N/A'}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Row 2: Profile Photos and Document Status (2 Columns) */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Card 4: Profile Photos */}
-                <div className="bg-white rounded-3xl border border-gray-100 p-5 shadow-sm hover:shadow-md transition-all duration-200 relative flex flex-col justify-between min-h-[220px]">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <div>
-                      <span className="text-xs uppercase font-extrabold text-slate-900 tracking-wider block">Profile Photos</span>
-                      <span className="text-[10px] text-slate-500 font-bold block">Biometric Images</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 grid grid-cols-3 gap-4 mt-1">
-                    {/* Borrower Photo */}
-                    <div className="text-center">
-                      <div className="w-full aspect-[4/3] rounded-xl bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center relative group">
-                        {selectedLoan.customer?.customer_photo_url ? (
-                          <img src={selectedLoan.customer.customer_photo_url} alt="Borrower Person" className="w-full h-full object-cover" />
-                        ) : selectedLoan.customer_photo_url ? (
-                          <img src={selectedLoan.customer_photo_url} alt="Borrower Person" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-8 h-8 text-gray-300" />
-                        )}
-                        <span className="absolute bottom-0 left-0 right-0 bg-slate-900/60 text-white text-[10px] py-1 text-center font-bold tracking-wider opacity-90">BORROWER</span>
+                    {/* Receipt + Amount row */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[13px] font-bold text-slate-700 uppercase block mb-1">Receipt No</label>
+                        <Input value={receiptNo} readOnly className="bg-gray-50 text-slate-900 font-mono text-[17px] font-bold h-11" />
+                      </div>
+                      <div>
+                        <label className="text-[13px] font-bold text-slate-700 uppercase block mb-1">Total Amount Paying</label>
+                        <Input
+                          value={totalAmountPaying}
+                          onChange={setTotalAmountPaying}
+                          className="font-bold text-green-700 text-[18px] h-11"
+                          placeholder="Enter ₹"
+                          type="text"
+                          inputMode="decimal"
+                          disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
+                        />
                       </div>
                     </div>
 
-                    {/* Surety 1 Photo */}
-                    <div className="text-center">
-                      <div className="w-full aspect-[4/3] rounded-xl bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center relative group">
-                        {guarantor1?.photo_url ? (
-                          <img src={guarantor1.photo_url} alt="Surety 1 Person" className="w-full h-full object-cover" />
-                        ) : guarantor1?.customer_photo_url ? (
-                          <img src={guarantor1.customer_photo_url} alt="Surety 1 Person" className="w-full h-full object-cover" />
-                        ) : selectedLoan.surety_photo_url ? (
-                          <img src={selectedLoan.surety_photo_url} alt="Surety 1 Person" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-8 h-8 text-gray-300" />
-                        )}
-                        <span className="absolute bottom-0 left-0 right-0 bg-slate-900/60 text-white text-[10px] py-1 text-center font-bold tracking-wider opacity-90">SURETY 1</span>
-                      </div>
-                    </div>
+                    {/* Payment Allocation Visualizer (shows only when amount entered) */}
+                    {paymentPreview && (
+                      <div className="bg-slate-50/50 border border-slate-100 rounded-xl px-3 py-2 space-y-2.5 shadow-sm">
+                        <h4 className="text-[12px] text-slate-800 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                          <CreditCard className="w-3.5 h-3.5 text-slate-500" />
+                          Real-Time Payment Allocation
+                        </h4>
 
-                    {/* Surety 2 Photo */}
-                    <div className="text-center">
-                      <div className="w-full aspect-[4/3] rounded-xl bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center relative group">
-                        {guarantor2?.photo_url ? (
-                          <img src={guarantor2.photo_url} alt="Surety 2 Person" className="w-full h-full object-cover" />
-                        ) : guarantor2?.customer_photo_url ? (
-                          <img src={guarantor2.customer_photo_url} alt="Surety 2 Person" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-8 h-8 text-gray-300" />
-                        )}
-                        <span className="absolute bottom-0 left-0 right-0 bg-slate-900/60 text-white text-[10px] py-1 text-center font-bold tracking-wider opacity-90">SURETY 2</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Card 5: Documents & Status */}
-                <div className="bg-white rounded-3xl border border-gray-100 p-5 shadow-sm hover:shadow-md transition-all duration-200 relative flex flex-col justify-between min-h-[220px]">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <div>
-                      <span className="text-xs uppercase font-extrabold text-slate-900 tracking-wider block">Document Status</span>
-                      <span className="text-[10px] text-slate-500 font-bold block">Pledged Files</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 flex flex-col justify-between gap-3 text-xs">
-                    <div className="space-y-2 text-gray-700">
-                      <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                        <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Doc Type:</span>
-                        <span className="text-xs font-black text-black text-right" title={loanDocuments.map(d => d.document_name).join(', ')}>
-                          {loanDocuments.map(d => d.document_name).join(', ') || 'N/A'}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center border-b border-gray-50 pb-1.5">
-                        <span className="text-[11px] uppercase font-extrabold text-slate-900 tracking-wider">Returned Status:</span>
-                        <span className={`px-3 py-1 rounded-full text-[10px] font-black ${
-                          documentReturned ? 'bg-blue-100 text-blue-800' : 'bg-rose-100 text-rose-800'
-                        }`}>
-                          {documentReturned ? 'Yes (Returned)' : 'No (Submitted)'}
-                        </span>
-                      </div>
-                    </div>
-                    <Button
-                      onClick={() => setShowReturnDocModal(true)}
-                      disabled={(selectedLoan.status !== 'Closed' && selectedLoan.status !== 'NPA_CLOSED') || !!renewCalculations?.isDateInvalid}
-                      variant="primary"
-                      size="sm"
-                      className="w-full bg-green-600 hover:bg-green-700 border-0 text-xs py-2 uppercase font-bold tracking-wider mt-1 font-sans"
-                    >
-                      Document Returned
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Unified Operator Workspace - 2 Column Layout */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              
-              {/* LEFT COLUMN (2/3 Width): Action Hub & Statements */}
-              <div className="lg:col-span-2 space-y-6">
-                
-                {/* Operator calculations panel */}
-                <Card 
-                  title="Operator Action & Calculations" 
-                  subtitle="Configure transactions and calculations details"
-                  className="shadow-sm border-gray-100 rounded-3xl"
-                >
-                  {renewCalculations?.isDateInvalid ? (
-                    <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-2xl px-4 py-3 text-red-750 font-semibold mb-6">
-                      <ShieldAlert className="w-5 h-5 shrink-0 text-red-600" />
-                      <span>Payment date cannot be before loan date ({renewCalculations.loanDate}).</span>
-                    </div>
-                  ) : null}
-
-                  {/* Active Interactive Fields */}
-                  <div className="grid grid-cols-2 gap-4 mb-6">
-                    <Input label="Receipt No" value={receiptNo} readOnly className="bg-gray-50 text-gray-700 font-mono" />
-                    <Input 
-                      label="Total Amount Paying" 
-                      value={totalAmountPaying} 
-                      onChange={setTotalAmountPaying} 
-                      className="font-bold text-green-700 text-lg" 
-                      placeholder="Enter ₹" 
-                      type="text"
-                      inputMode="decimal"
-                      disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
-                    />
-                  </div>
-
-                  {/* Signature Element: Interactive Payment Allocation Visualizer */}
-                  {paymentPreview && (
-                    <div className="bg-slate-50/50 border border-slate-100 rounded-2xl p-4 mb-6 space-y-4 shadow-sm">
-                      <h4 className="text-xs text-slate-800 font-bold uppercase tracking-wider border-b border-slate-200/60 pb-1.5 flex items-center gap-1.5">
-                        <CreditCard className="w-3.5 h-3.5 text-slate-500" />
-                        Real-Time Payment Allocation Visualizer
-                      </h4>
-
-                      {paymentPreview.isClosingPayment ? (
-                        <div className="space-y-3">
-                          <span className="text-xs font-bold text-slate-600 uppercase block">Closing Allocation Preview</span>
-                          {(() => {
-                            const total = paymentPreview.paymentAmount;
-                            const pPaid = paymentPreview.renew.penaltyPaid;
-                            const oPaid = paymentPreview.renew.overdueInterestPaid;
-                            const prPaid = paymentPreview.renew.principalPaid;
-
-                            const pctP = total > 0 ? (pPaid / total) * 100 : 0;
-                            const pctO = total > 0 ? (oPaid / total) * 100 : 0;
-                            const pctPr = total > 0 ? (prPaid / total) * 100 : 0;
-
-                            return (
-                              <div className="space-y-2.5">
-                                <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner">
-                                  {pctP > 0 && <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${pctP}%` }} title={`Penalty: ₹${pPaid}`} />}
-                                  {pctO > 0 && <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${pctO}%` }} title={`Overdue Interest: ₹${oPaid}`} />}
-                                  {pctPr > 0 && <div className="bg-indigo-650 h-full transition-all duration-300" style={{ width: `${pctPr}%` }} title={`Principal: ₹${prPaid}`} />}
-                                </div>
-                                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-semibold text-slate-600 font-sans">
-                                  {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
-                                  {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
-                                  {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-indigo-650"></span>Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
-                                </div>
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      ) : (
-                        <div className="space-y-4">
-                          {/* Option 1 Bar */}
-                          <div className="space-y-2">
-                            <span className="text-[11px] font-bold text-emerald-800 uppercase block">Option 1: Renewal Account Allocation</span>
+                        {paymentPreview.isClosingPayment ? (
+                          <div className="space-y-1.5">
+                            <span className="text-[12px] font-bold text-slate-700 uppercase block">Closing Allocation Preview</span>
                             {(() => {
                               const total = paymentPreview.paymentAmount;
                               const pPaid = paymentPreview.renew.penaltyPaid;
                               const oPaid = paymentPreview.renew.overdueInterestPaid;
-                              const rPaid = paymentPreview.renew.renewalInterestPaid;
                               const prPaid = paymentPreview.renew.principalPaid;
-
                               const pctP = total > 0 ? (pPaid / total) * 100 : 0;
                               const pctO = total > 0 ? (oPaid / total) * 100 : 0;
-                              const pctR = total > 0 ? (rPaid / total) * 100 : 0;
                               const pctPr = total > 0 ? (prPaid / total) * 100 : 0;
-
                               return (
-                                <div className="space-y-2">
-                                  <div className="h-3.5 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner border border-slate-200/40">
+                                <div className="space-y-1.5">
+                                  <div className="h-4 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner border border-slate-200/20">
                                     {pctP > 0 && <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${pctP}%` }} title={`Penalty: ₹${pPaid}`} />}
                                     {pctO > 0 && <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${pctO}%` }} title={`Overdue Interest: ₹${oPaid}`} />}
-                                    {pctR > 0 && <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${pctR}%` }} title={`Renewal Interest: ₹${rPaid}`} />}
                                     {pctPr > 0 && <div className="bg-indigo-650 h-full transition-all duration-300" style={{ width: `${pctPr}%` }} title={`Principal: ₹${prPaid}`} />}
                                   </div>
-                                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-semibold text-slate-600 font-sans">
-                                    {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500"></span>Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
-                                    {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500"></span>Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
-                                    {rPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span>Renewal Int: ₹{rPaid.toLocaleString('en-IN')}</span>}
-                                    {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-650"></span>Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
+                                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] font-bold text-slate-800">
+                                    {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
+                                    {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" />Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
+                                    {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-650" />Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
                                   </div>
                                 </div>
                               );
                             })()}
                           </div>
-
-                          {/* Option 2 Bar */}
-                          {paymentPreview.partial.principalPaid > 0 && (
-                            <div className="space-y-2 border-t border-slate-200/50 pt-3">
-                              <span className="text-[11px] font-bold text-indigo-800 uppercase block">Option 2: Partial Payment Allocation (Principal Only)</span>
+                        ) : (
+                          <div className="space-y-2.5">
+                            {/* Option 1 Bar */}
+                            <div className="space-y-1">
+                              <span className="text-[12px] font-bold text-emerald-800 uppercase block">Option 1: Renewal Allocation</span>
                               {(() => {
                                 const total = paymentPreview.paymentAmount;
-                                const pPaid = paymentPreview.partial.penaltyPaid;
-                                const oPaid = paymentPreview.partial.overdueInterestPaid;
-                                const rPaid = paymentPreview.partial.renewalInterestPaid;
-                                const prPaid = paymentPreview.partial.principalPaid;
-
+                                const pPaid = paymentPreview.renew.penaltyPaid;
+                                const oPaid = paymentPreview.renew.overdueInterestPaid;
+                                const rPaid = paymentPreview.renew.renewalInterestPaid;
+                                const prPaid = paymentPreview.renew.principalPaid;
                                 const pctP = total > 0 ? (pPaid / total) * 100 : 0;
                                 const pctO = total > 0 ? (oPaid / total) * 100 : 0;
                                 const pctR = total > 0 ? (rPaid / total) * 100 : 0;
                                 const pctPr = total > 0 ? (prPaid / total) * 100 : 0;
-
                                 return (
-                                  <div className="space-y-2">
-                                    <div className="h-3.5 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner border border-slate-200/40">
+                                  <div className="space-y-1">
+                                    <div className="h-4 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner border border-slate-200/40">
                                       {pctP > 0 && <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${pctP}%` }} title={`Penalty: ₹${pPaid}`} />}
                                       {pctO > 0 && <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${pctO}%` }} title={`Overdue Interest: ₹${oPaid}`} />}
                                       {pctR > 0 && <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${pctR}%` }} title={`Renewal Interest: ₹${rPaid}`} />}
                                       {pctPr > 0 && <div className="bg-indigo-650 h-full transition-all duration-300" style={{ width: `${pctPr}%` }} title={`Principal: ₹${prPaid}`} />}
                                     </div>
-                                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-semibold text-slate-600 font-sans">
-                                      {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500"></span>Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
-                                      {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500"></span>Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
-                                      {rPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span>Renewal Int: ₹{rPaid.toLocaleString('en-IN')}</span>}
-                                      {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-650"></span>Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
+                                    <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[13px] font-bold text-slate-800">
+                                      {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
+                                      {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" />Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
+                                      {rPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />Renewal Int: ₹{rPaid.toLocaleString('en-IN')}</span>}
+                                      {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-650" />Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
                                     </div>
                                   </div>
                                 );
                               })()}
                             </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Form variables display */}
-                  <div className="grid grid-cols-2 gap-3 mb-6 font-sans">
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Loan Amount:</span>
-                      <span className="text-base font-black text-black">₹{originalLoanAmount.toLocaleString('en-IN')}</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Rate / Penalty:</span>
-                      <span className="text-base font-black text-black">{Number(selectedLoan.interest_rate).toFixed(2)}% / {Number(selectedLoan.penalty_percent || 0.75).toFixed(2)}%</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Loan Date:</span>
-                      <span className="text-base font-black text-black">{formatDateOld(originalLoanDate)}</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Last Payment:</span>
-                      <span className="text-base font-black text-black">{formatDateOld(selectedLoan.date)}</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Current Due Date:</span>
-                      <span className="text-base font-black text-black">{formatDateOld(renewCalculations?.dueDate)}</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Next Due Date:</span>
-                      <span className="text-base font-black text-black">{totalAmountPaying && Number(totalAmountPaying) > 0 && paymentPreview?.renew?.nextDueDate ? formatDateOld(paymentPreview.renew.nextDueDate) : '—'}</span>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Due Days:</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-base font-black text-black">{renewCalculations?.daysPastDue !== undefined ? renewCalculations.daysPastDue : 0}</span>
-                        {renewCalculations && renewCalculations.daysRemaining !== undefined && renewCalculations.daysRemaining > 0 && (
-                          <span className="inline-flex px-1.5 py-0.5 rounded bg-green-100 text-green-800 font-black text-[10px] uppercase tracking-wider">{renewCalculations.daysRemaining} Left</span>
+                            {/* Option 2 Bar */}
+                            {paymentPreview.partial.principalPaid > 0 && (
+                              <div className="space-y-1 border-t border-slate-200/50 pt-2">
+                                <span className="text-[12px] font-bold text-indigo-800 uppercase block">Option 2: Partial Payment Allocation</span>
+                                {(() => {
+                                  const total = paymentPreview.paymentAmount;
+                                  const pPaid = paymentPreview.partial.penaltyPaid;
+                                  const oPaid = paymentPreview.partial.overdueInterestPaid;
+                                  const rPaid = paymentPreview.partial.renewalInterestPaid;
+                                  const prPaid = paymentPreview.partial.principalPaid;
+                                  const pctP = total > 0 ? (pPaid / total) * 100 : 0;
+                                  const pctO = total > 0 ? (oPaid / total) * 100 : 0;
+                                  const pctR = total > 0 ? (rPaid / total) * 100 : 0;
+                                  const pctPr = total > 0 ? (prPaid / total) * 100 : 0;
+                                  return (
+                                    <div className="space-y-1">
+                                      <div className="h-4 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner border border-slate-200/40">
+                                        {pctP > 0 && <div className="bg-rose-500 h-full transition-all duration-300" style={{ width: `${pctP}%` }} title={`Penalty: ₹${pPaid}`} />}
+                                        {pctO > 0 && <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${pctO}%` }} title={`Overdue Interest: ₹${oPaid}`} />}
+                                        {pctR > 0 && <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${pctR}%` }} title={`Renewal Interest: ₹${rPaid}`} />}
+                                        {pctPr > 0 && <div className="bg-indigo-650 h-full transition-all duration-300" style={{ width: `${pctPr}%` }} title={`Principal: ₹${prPaid}`} />}
+                                      </div>
+                                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[13px] font-bold text-slate-800">
+                                        {pPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />Penalty: ₹{pPaid.toLocaleString('en-IN')}</span>}
+                                        {oPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" />Overdue Int: ₹{oPaid.toLocaleString('en-IN')}</span>}
+                                        {rPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />Renewal Int: ₹{rPaid.toLocaleString('en-IN')}</span>}
+                                        {prPaid > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-650" />Principal: ₹{prPaid.toLocaleString('en-IN')}</span>}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl bg-slate-50/80 p-3 shadow-sm">
-                      <span className="text-xs text-slate-900 font-extrabold uppercase block tracking-wider mb-1">Doc Status:</span>
-                      <span className="text-base font-black text-black">{documentReturned ? 'Returned' : 'Submitted'}</span>
-                    </div>
-                  </div>
+                    )}
 
-                  {/* Actions buttons */}
-                  <div className="grid grid-cols-3 gap-3">
-                    <Button
-                      onClick={() => handleActionSubmit('Renew')}
-                      disabled={
-                        isRenewing || 
-                        selectedLoan.status === 'Closed' || 
-                        selectedLoan.status === 'NPA_CLOSED' || 
-                        !!renewCalculations?.isDateInvalid ||
-                        !totalAmountPaying || 
-                        Number(totalAmountPaying) <= 0
-                      }
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      Renewal
-                    </Button>
-                    
-                    <Button
-                      onClick={() => handleActionSubmit('Partial')}
-                      disabled={
-                        isRenewing || 
-                        !totalAmountPaying || 
-                        Number(totalAmountPaying) <= 0 ||
-                        Number(totalAmountPaying) >= ledgerMetrics.principalBalance ||
-                        selectedLoan.status === 'Closed' || 
-                        selectedLoan.status === 'NPA_CLOSED' || 
-                        !!renewCalculations?.isDateInvalid
-                      }
-                      className="bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0"
-                    >
-                      <CreditCard className="w-3.5 h-3.5" />
-                      Partial Payment
-                    </Button>
-                    
-                    <Button
-                      onClick={() => handleActionSubmit('Close')}
-                      disabled={
-                        isRenewing || 
-                        selectedLoan.status === 'Closed' || 
-                        selectedLoan.status === 'NPA_CLOSED' || 
-                        !totalAmountPaying ||
-                        Number(totalAmountPaying) < ledgerMetrics.totalClose ||
-                        !!renewCalculations?.isDateInvalid
-                      }
-                      className="bg-rose-600 hover:bg-rose-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0"
-                    >
-                      <ShieldAlert className="w-3.5 h-3.5" />
-                      Close Account
-                    </Button>
-                  </div>
-                </Card>
-
-                {/* Statements & Logs unified tabbed card */}
-                <Card 
-                  title={
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
-                      <div>
-                        <span className="text-base font-extrabold text-slate-950 block">Statements & Logs</span>
-                        <span className="text-xs text-slate-600 font-bold block mt-0.5">Track transaction history and interest accruals</span>
+                    {/* Compact 9-cell Loan Details grid (2 cols per row, except Days & Due Days side-by-side) */}
+                    <div className="grid grid-cols-4 gap-2 font-sans">
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Loan Amount</span>
+                        <span className="text-[16px] font-bold text-slate-900">₹{originalLoanAmount.toLocaleString('en-IN')}</span>
                       </div>
-                      <div className="flex gap-1.5 bg-gray-100 border border-gray-200 p-1 rounded-xl self-start sm:self-auto font-sans">
-                        <button
-                          onClick={() => setActiveLogTab('statement')}
-                          className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${
-                            activeLogTab === 'statement' 
-                              ? 'bg-white text-green-800 shadow-sm border border-gray-150' 
-                              : 'text-slate-900 hover:text-black'
-                          }`}
-                        >
-                          Ledger Statement
-                        </button>
-                        <button
-                          onClick={() => setActiveLogTab('interest')}
-                          className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${
-                            activeLogTab === 'interest' 
-                              ? 'bg-white text-green-800 shadow-sm border border-gray-150' 
-                              : 'text-slate-900 hover:text-black'
-                          }`}
-                        >
-                          Interest History
-                        </button>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Rate / Penalty</span>
+                        <span className="text-[16px] font-bold text-slate-900">{Number(selectedLoan.interest_rate).toFixed(2)}% / {Number(selectedLoan.penalty_percent || 0.75).toFixed(2)}%</span>
+                      </div>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Loan Date</span>
+                        <span className="text-[16px] font-bold text-slate-900">{formatDateOld(originalLoanDate)}</span>
+                      </div>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Last Payment</span>
+                        <span className="text-[16px] font-bold text-slate-900">{renewCalculations?.error ? '—' : (formatDateOld(renewCalculations?.lastPaymentDate) || '—')}</span>
+                      </div>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Current Due Date</span>
+                        <span className="text-[16px] font-bold text-slate-900">{renewCalculations?.error ? '—' : formatDateOld(renewCalculations?.currentDueDate)}</span>
+                      </div>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Next Due Date</span>
+                        <span className="text-[16px] font-bold text-slate-900">{renewCalculations?.error ? '—' : (totalAmountPaying && Number(totalAmountPaying) > 0 && paymentPreview?.renew?.nextDueDate ? formatDateOld(paymentPreview.renew.nextDueDate) : '—')}</span>
+                      </div>
+                      <div className="col-span-1 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Days</span>
+                        <span className="text-[16px] font-bold text-slate-900">{renewCalculations?.error ? '—' : (renewCalculations?.displayDays !== undefined ? Number(renewCalculations.displayDays).toFixed(2) : '0.00')}</span>
+                      </div>
+                      <div className="col-span-1 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Due Days</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[16px] font-bold text-slate-900">{renewCalculations?.error ? '—' : (renewCalculations?.displayDueDays !== undefined ? renewCalculations.displayDueDays : 0)}</span>
+                          {!renewCalculations?.error && renewCalculations && renewCalculations.displayDueDays !== undefined && renewCalculations.displayDueDays < 0 && (
+                            <span className="inline-flex px-1.5 py-0.5 rounded bg-green-100 text-green-800 font-black text-[10px] uppercase tracking-wider">{Math.abs(renewCalculations.displayDueDays)} Left</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="col-span-2 border border-slate-200 rounded-lg bg-slate-50/80 px-2.5 py-1.5 shadow-sm">
+                        <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Doc Status</span>
+                        <span className="text-[16px] font-bold text-slate-900">{documentReturned ? 'Returned' : 'Submitted'}</span>
                       </div>
                     </div>
-                  }
-                  className="shadow-sm border-gray-100 rounded-3xl w-full font-sans"
-                >
-                  {activeLogTab === 'statement' ? (
-                    <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
-                      <table className="w-full text-[13px] text-left min-w-[1000px]">
-                        <thead>
-                          <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
-                            <th className="px-4 py-3.5">Date</th>
-                            <th className="px-4 py-3.5">A/C Name</th>
-                            <th className="px-4 py-3.5 text-right">Credit</th>
-                            <th className="px-4 py-3.5 text-right">Debit</th>
-                            <th className="px-4 py-3.5">User</th>
-                            <th className="px-4 py-3.5">Receipt No</th>
-                            <th className="px-4 py-3.5">Particulars</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-150 bg-white">
-                          {displayedStatementEntries.map((entry) => (
-                            <tr key={entry.id} className="hover:bg-gray-50/60 transition-colors">
-                              <td className="px-4 py-3.5 font-bold text-slate-800">{formatDateOld(entry.entry_date)}</td>
-                              <td className="px-4 py-3.5 font-black text-slate-950">{entry.account_name || 'CD A/C'}</td>
-                              <td className="px-4 py-3.5 text-right text-green-800 font-black text-sm">
-                                {entry.credit > 0 ? `₹${entry.credit.toLocaleString('en-IN')}` : '-'}
-                              </td>
-                              <td className="px-4 py-3.5 text-right text-red-700 font-black text-sm">
-                                {entry.debit > 0 ? `₹${entry.debit.toLocaleString('en-IN')}` : '-'}
-                              </td>
-                              <td className="px-4 py-3.5 text-slate-800 font-bold">{entry.user_name || 'Staff'}</td>
-                              <td className="px-4 py-3.5 font-mono text-slate-900 font-black">{entry.receipt_no || '-'}</td>
-                              <td className="px-4 py-3.5 text-slate-700 font-bold" title={entry.particulars}>{entry.particulars || '-'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+
+                    {/* Action buttons — last row of the left block */}
+                    <div className="grid grid-cols-3 gap-2 mt-auto">
+                      <Button
+                        onClick={() => handleActionSubmit('Renew')}
+                        disabled={
+                          isRenewing ||
+                          selectedLoan.status === 'Closed' ||
+                          selectedLoan.status === 'NPA_CLOSED' ||
+                          !!renewCalculations?.isDateInvalid ||
+                          !!renewCalculations?.error ||
+                          !totalAmountPaying ||
+                          Number(totalAmountPaying) <= 0
+                        }
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0 animate-none"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Renewal
+                      </Button>
+
+                      <Button
+                        onClick={() => handleActionSubmit('Partial')}
+                        disabled={
+                          isRenewing ||
+                          !totalAmountPaying ||
+                          Number(totalAmountPaying) <= 0 ||
+                          Number(totalAmountPaying) < ledgerMetrics.totalToRegularize ||
+                          Number(totalAmountPaying) >= ledgerMetrics.totalClose ||
+                          selectedLoan.status === 'Closed' ||
+                          selectedLoan.status === 'NPA_CLOSED' ||
+                          !!renewCalculations?.isDateInvalid ||
+                          !!renewCalculations?.error
+                        }
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0 animate-none"
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        Partial Payment
+                      </Button>
+
+                      <Button
+                        onClick={() => handleActionSubmit('Close')}
+                        disabled={
+                          isRenewing ||
+                          selectedLoan.status === 'Closed' ||
+                          selectedLoan.status === 'NPA_CLOSED' ||
+                          !totalAmountPaying ||
+                          Number(totalAmountPaying) < ledgerMetrics.totalClose ||
+                          !!renewCalculations?.isDateInvalid ||
+                          !!renewCalculations?.error
+                        }
+                        className="bg-rose-600 hover:bg-rose-700 text-white py-2.5 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 border-0 animate-none"
+                      >
+                        <ShieldAlert className="w-3.5 h-3.5" />
+                        Close Account
+                      </Button>
                     </div>
-                  ) : (
-                    <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
-                      <table className="w-full text-[13px] text-left min-w-[1000px]">
-                        <thead>
-                          <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
-                            <th className="px-4 py-3.5">Date</th>
-                            <th className="px-4 py-3.5 text-right">Credit</th>
-                            <th className="px-4 py-3.5">Receipt No</th>
-                            <th className="px-4 py-3.5">Type</th>
-                            <th className="px-4 py-3.5">Particulars</th>
-                            <th className="px-4 py-3.5 text-center">Days Renewed</th>
-                            <th className="px-4 py-3.5">Renewed Till</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-150 bg-white">
-                          {displayedInterestDetails.map((detail) => (
-                            <tr key={detail.id} className="hover:bg-gray-50/60 transition-colors">
-                              <td className="px-4 py-3.5 font-bold text-slate-800">{formatDateOld(detail.entry_date)}</td>
-                              <td className="px-4 py-3.5 text-right text-green-800 font-black text-sm">
-                                ₹{Number(detail.credit).toLocaleString('en-IN')}
-                              </td>
-                              <td className="px-4 py-3.5 font-mono text-slate-900 font-black">{detail.receipt_no || '-'}</td>
-                              <td className="px-4 py-3.5 font-black text-slate-950">{detail.row_type || '-'}</td>
-                              <td className="px-4 py-3.5 text-slate-700 font-bold" title={detail.particulars}>{detail.particulars || '-'}</td>
-                              <td className="px-4 py-3.5 text-center font-black text-slate-900">{detail.renewed_days > 0 ? `${detail.renewed_days} Days` : '-'}</td>
-                              <td className="px-4 py-3.5 font-bold text-slate-800">{detail.renewed_till_date ? formatDateOld(detail.renewed_till_date) : '-'}</td>
-                            </tr>
-                          ))}
-                          {displayedInterestDetails.length === 0 ? (
-                            <tr>
-                              <td colSpan={7} className="text-center py-8 text-slate-500 font-bold italic">No interest details found for this loan</td>
-                            </tr>
-                          ) : null}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Card>
 
-              </div>
-
-              {/* RIGHT COLUMN (1/3 Width): Summary & Files */}
-              <div className="lg:col-span-1 space-y-6">
-
-                {/* Bento Metrics Panel (Unified Summary Panel) */}
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Amount / Principal */}
-                  <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                    <span className="text-slate-800 text-xs uppercase font-extrabold tracking-wider block mb-1">Principal Bal.</span>
-                    <span className="text-xl font-black text-slate-950 block">₹{ledgerMetrics.principalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                  </div>
-
-                  {/* Today Due */}
-                  <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                    <span className="text-slate-800 text-xs uppercase font-extrabold tracking-wider block mb-1">Today Due</span>
-                    <span className={`text-xl font-black block ${(ledgerMetrics.pendingInterest + ledgerMetrics.pendingPenalty) < 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
-                      ₹{(ledgerMetrics.pendingInterest + ledgerMetrics.pendingPenalty).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  {/* Interest */}
-                  <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                    <span className="text-slate-800 text-xs uppercase font-extrabold tracking-wider block mb-1">Accrued Interest</span>
-                    <span className={`text-lg font-black block ${ledgerMetrics.pendingInterest < 0 ? 'text-emerald-700' : 'text-slate-950'}`}>
-                      ₹{ledgerMetrics.pendingInterest.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  {/* Penalty */}
-                  <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                    <span className="text-slate-800 text-xs uppercase font-extrabold tracking-wider block mb-1">Accrued Penalty</span>
-                    <span className="text-lg font-black text-rose-700 block">₹{ledgerMetrics.pendingPenalty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                  </div>
-
-                  {/* Total for Renewal */}
-                  <div className="col-span-2 bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex justify-between items-center shadow-sm">
-                    <div>
-                      <span className="text-emerald-900 text-xs uppercase font-black tracking-wider block">Total for Renewal</span>
-                      <span className="text-[11px] text-emerald-800 font-bold block mt-0.5">To extend standard cycle</span>
-                    </div>
-                    <span className="text-[22px] font-black text-emerald-800">
-                      ₹{ledgerMetrics.renewalDue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  {/* Total to Regularize */}
-                  <div className="col-span-2 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex justify-between items-center shadow-sm">
-                    <div>
-                      <span className="text-amber-900 text-xs uppercase font-black tracking-wider block">Total to Regularize</span>
-                      <span className="text-[11px] text-amber-800 font-bold block mt-0.5">Overdue interest + penalty + renewal</span>
-                    </div>
-                    <span className="text-[22px] font-black text-amber-800">
-                      ₹{ledgerMetrics.totalToRegularize.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  {/* Payoff Close Card - Slate/Indigo theme */}
-                  <div className="col-span-2 bg-slate-950 border border-slate-900 rounded-2xl p-4 text-white flex justify-between items-center shadow-md hover:scale-[1.01] transition-transform">
-                    <div>
-                      <span className="text-white text-xs uppercase font-black tracking-wider block">Total for Close</span>
-                      <span className="text-[11px] text-slate-350 font-bold block mt-0.5">Full payoff principal & dues</span>
-                    </div>
-                    <span className="text-2xl font-black text-emerald-400">
-                      ₹{ledgerMetrics.totalClose.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
                   </div>
                 </div>
+              </div>
 
-                {/* Submitted Files & Media Card */}
-                <Card title="Submitted Files & Media" className="shadow-sm border-gray-100 rounded-3xl max-h-[300px] overflow-y-auto">
-                  <div className="space-y-2.5">
-                    {/* Document Upload selector */}
-                    <div className="flex gap-2 p-2 bg-gray-50 border border-gray-150 rounded-xl items-center">
-                      <select 
-                        value={docType} 
-                        onChange={(e) => setDocType(e.target.value)} 
-                        disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
-                        className="flex-1 text-xs bg-white border border-gray-250 p-1.5 rounded-lg focus:outline-none font-sans font-bold text-slate-900"
-                      >
-                        <option value="Pledge Document">Pledge Document</option>
-                        <option value="Aadhaar Card Copy">Aadhaar Card Copy</option>
-                        <option value="PAN Card Copy">PAN Card Copy</option>
-                        <option value="Land Registry Copy">Land Registry Copy</option>
-                        <option value="Other Attachment">Other Attachment</option>
-                      </select>
-                      <label className={`bg-green-600 hover:bg-green-700 text-white px-2 py-1.5 rounded-lg text-xs font-semibold cursor-pointer select-none ${
-                        (selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED') ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''
-                      }`}>
-                        {uploadingDoc ? 'Uploading...' : 'Upload'}
-                        <input 
-                          type="file" 
-                          onChange={handleUploadDocument} 
-                          disabled={uploadingDoc || selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'} 
-                          className="hidden" 
-                        />
-                      </label>
+              {/* RIGHT BLOCK (4 cols): Account Position Metrics */}
+              <div className="col-span-4">
+                {renewCalculations?.error ? (
+                  <div className="bg-red-50 border border-red-200 rounded-2xl p-4 shadow-sm h-full flex flex-col justify-center items-center text-center">
+                    <ShieldAlert className="w-12 h-12 text-red-600 mb-3 animate-pulse" />
+                    <h3 className="text-red-900 text-lg font-black uppercase tracking-wider mb-2">Account Data Error</h3>
+                    <p className="text-red-700 text-sm font-semibold mb-4 leading-relaxed">
+                      {selectedLoan.loan_id} contains an invalid loan timeline.
+                      <br />
+                      Loan date: {formatDateOld(originalLoanDate)}
+                      <br />
+                      Earliest payment: {formatDateOld(cdLedgerEntries.filter(e => e.entry_type === 'amount_paid' || Number(e.credit) > 0).sort((a, b) => new Date(a.entry_date).getTime() - new Date(b.entry_date).getTime())[0]?.entry_date)}
+                    </p>
+                    <span className="text-xs text-red-500 font-bold uppercase tracking-wider">Account position cannot be calculated safely.</span>
+                  </div>
+                ) : (
+                  <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden h-full flex flex-col">
+
+                    {/* Card micro-header */}
+                    <div className="px-3 py-2.5 border-b border-gray-100">
+                      <span className="text-[14px] font-bold uppercase text-slate-800 tracking-wider">Account Position</span>
                     </div>
 
-                    <div className="divide-y divide-gray-100">
-                      {aggregatedDocs.map((doc) => (
-                        <div key={doc.id} className="flex justify-between items-center py-2 text-xs">
-                          <div className="flex flex-col flex-1 min-w-0 pr-2">
-                            <span className="font-semibold text-gray-800 truncate">{doc.name}</span>
-                            <span className="text-[10px] text-gray-400 truncate">{doc.remarks}</span>
-                          </div>
-                          <div className="flex items-center gap-2 font-sans">
-                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
-                              doc.returnedStatus === 'Returned' ? 'bg-blue-50 text-blue-700' : 'bg-green-50 text-green-700'
-                            }`}>
-                              {doc.returnedStatus}
-                            </span>
-                            {doc.fileUrl ? (
-                              <a href={doc.fileUrl} target="_blank" rel="noreferrer" className="text-green-700 hover:underline font-bold">
-                                View
-                              </a>
-                            ) : null}
-                            {doc.allowDelete ? (
-                              <button 
-                                onClick={() => handleDeleteDocument(doc.id)} 
-                                disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
-                                className="text-red-500 hover:text-red-700 font-bold ml-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            ) : null}
-                          </div>
+                    <div className="p-3 flex flex-col gap-2.5 flex-1">
+
+                      {/* 2×2 Compact Metrics Grid */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-white border border-gray-200 rounded-xl px-2.5 py-1.5 shadow-sm">
+                          <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Principal Bal.</span>
+                          <span className="text-[20px] font-bold text-slate-955 block leading-snug">₹{ledgerMetrics.principalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
-                      ))}
-                      {aggregatedDocs.length === 0 ? (
-                        <p className="text-center text-gray-400 italic py-4">No documents or files found</p>
-                      ) : null}
+                        <div className="bg-white border border-gray-200 rounded-xl px-2.5 py-1.5 shadow-sm">
+                          <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Today Due</span>
+                          <span className={`text-[20px] font-bold block leading-snug ${ledgerMetrics.todayDue < 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                            ₹{ledgerMetrics.todayDue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-xl px-2.5 py-1.5 shadow-sm">
+                          <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Accrued Interest</span>
+                          <span className={`text-[20px] font-bold block leading-snug ${ledgerMetrics.pendingInterest < 0 ? 'text-emerald-700' : 'text-slate-955'}`}>
+                            ₹{ledgerMetrics.pendingInterest.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="bg-white border border-gray-200 rounded-xl px-2.5 py-1.5 shadow-sm">
+                          <span className="text-[13px] text-slate-500 font-bold uppercase block tracking-wider leading-none mb-0.5">Accrued Penalty</span>
+                          <span className="text-[20px] font-bold text-rose-700 block leading-snug">₹{ledgerMetrics.pendingPenalty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                      </div>
+
+                      {/* Total for Renewal */}
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 flex justify-between items-center shadow-sm">
+                        <div>
+                          <span className="text-emerald-900 text-[13px] uppercase font-bold tracking-wider block leading-none">Total for Renewal</span>
+                          <span className="text-[12px] text-emerald-700 font-semibold block mt-0.5">To extend standard cycle</span>
+                        </div>
+                        <span className="text-[22px] font-extrabold text-emerald-800">
+                          ₹{ledgerMetrics.renewalDue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      {/* Total to Regularize */}
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex justify-between items-center shadow-sm">
+                        <div>
+                          <span className="text-amber-900 text-[13px] uppercase font-bold tracking-wider block leading-none">Total to Regularize</span>
+                          <span className="text-[12px] text-amber-700 font-semibold block mt-0.5">Overdue int + penalty + renewal</span>
+                        </div>
+                        <span className="text-[22px] font-extrabold text-amber-800">
+                          ₹{ledgerMetrics.totalToRegularize.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      {/* Total for Close */}
+                      <div className="bg-slate-950 border border-slate-900 rounded-xl px-3 py-2 flex justify-between items-center shadow-md">
+                        <div>
+                          <span className="text-white text-[13px] uppercase font-bold tracking-wider block leading-none">Total for Close</span>
+                          <span className="text-[12px] text-slate-400 font-semibold block mt-0.5">Full payoff principal &amp; dues</span>
+                        </div>
+                        <span className="text-[22px] font-extrabold text-emerald-400">
+                          ₹{ledgerMetrics.totalClose.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
                     </div>
                   </div>
-                </Card>
-
+                )}
               </div>
 
             </div>
+
+            {/* ========== BELOW FOLD: Files & Statements ========== */}
+
+            {/* Statements & Logs unified tabbed card */}
+            <Card
+              title={
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
+                  <div>
+                    <span className="text-base font-extrabold text-slate-950 block">Statements &amp; Logs</span>
+                    <span className="text-xs text-slate-600 font-bold block mt-0.5">Track transaction history and interest accruals</span>
+                  </div>
+                  <div className="flex gap-1.5 bg-gray-100 border border-gray-200 p-1 rounded-xl self-start sm:self-auto font-sans">
+                    <button
+                      onClick={() => setActiveLogTab('statement')}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${activeLogTab === 'statement' ? 'bg-white text-green-800 shadow-sm border border-gray-150' : 'text-slate-900 hover:text-black'}`}
+                    >
+                      Ledger Statement
+                    </button>
+                    <button
+                      onClick={() => setActiveLogTab('interest')}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${activeLogTab === 'interest' ? 'bg-white text-green-800 shadow-sm border border-gray-150' : 'text-slate-900 hover:text-black'}`}
+                    >
+                      Interest History
+                    </button>
+                    <button
+                      onClick={() => setActiveLogTab('payment')}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${activeLogTab === 'payment' ? 'bg-white text-green-800 shadow-sm border border-gray-150' : 'text-slate-900 hover:text-black'}`}
+                    >
+                      Payment History
+                    </button>
+                    <button
+                      onClick={() => setActiveLogTab('editHistory')}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all uppercase tracking-wider ${activeLogTab === 'editHistory' ? 'bg-white text-green-800 shadow-sm border border-gray-150' : 'text-slate-900 hover:text-black'}`}
+                    >
+                      Edit History
+                    </button>
+                  </div>
+                </div>
+              }
+              className="shadow-sm border-gray-100 rounded-3xl w-full font-sans print:hidden animate-none relative"
+            >
+              {loadingTab && (
+                <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] flex items-center justify-center z-10 rounded-3xl">
+                  <div className="text-xs font-semibold text-slate-600 flex items-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-green-600" />
+                    Updating Tab Data...
+                  </div>
+                </div>
+              )}
+              {activeLogTab === 'statement' && (
+                <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
+                  <table className="w-full text-[13px] text-left min-w-[1000px]">
+                    <thead>
+                      <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
+                        <th className="px-4 py-3.5">Date</th>
+                        <th className="px-4 py-3.5">A/C Name</th>
+                        <th className="px-4 py-3.5 text-left">CR Amount</th>
+                        <th className="px-4 py-3.5 text-right">Credit</th>
+                        <th className="px-4 py-3.5 text-right">Debit</th>
+                        <th className="px-4 py-3.5">User</th>
+                        <th className="px-4 py-3.5">Receipt No</th>
+                        <th className="px-4 py-3.5">Particulars</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-150 bg-white">
+                      {displayedStatementEntries.map((entry) => {
+                        const isPending = entry.receipt_no && entry.receipt_no !== '-' && pendingReviews?.some(r => r?.receipt_number === entry.receipt_no && r?.loan_id === selectedLoan?.id);
+                        return (
+                          <tr key={entry.id} className={`hover:bg-gray-50/60 transition-colors ${isPending ? 'bg-[#fff7ed]' : ''}`}>
+                            <td className="px-4 py-3.5 font-bold text-slate-800">{formatDateOld(entry.entry_date)}</td>
+                            <td className="px-4 py-3.5 font-black text-slate-955">{mapAccountName(entry.account_name)}</td>
+                            <td className="px-4 py-3.5 text-right text-indigo-700 font-black text-sm">
+                              {isPaymentCollectionEntry(entry) && entry.credit > 0 ? `₹${entry.credit.toLocaleString('en-IN')}` : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right text-green-800 font-black text-sm">
+                              {!isPaymentCollectionEntry(entry) && entry.credit > 0 ? `₹${entry.credit.toLocaleString('en-IN')}` : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right text-red-650 font-black text-sm">
+                              {!isPaymentCollectionEntry(entry) && entry.debit > 0 ? `₹${entry.debit.toLocaleString('en-IN')}` : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 font-semibold text-slate-700">{entry.user_name || 'Staff'}</td>
+                            <td className="px-4 py-3.5 font-mono text-slate-800 font-bold">{entry.receipt_no || '-'}</td>
+                            <td className="px-4 py-3.5 text-slate-655 font-medium">{entry.particulars || '-'}</td>
+                          </tr>
+                        );
+                      })}
+                      {displayedStatementEntries.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="text-center py-8 text-gray-400 italic">No entries recorded in statement</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {activeLogTab === 'interest' && (
+                <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
+                  <table className="w-full text-[13px] text-left min-w-[1000px]">
+                    <thead>
+                      <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
+                        <th className="px-4 py-3.5">Date</th>
+                        <th className="px-4 py-3.5 text-right">Credit</th>
+                        <th className="px-4 py-3.5">Receipt No</th>
+                        <th className="px-4 py-3.5">Type</th>
+                        <th className="px-4 py-3.5">Particulars</th>
+                        <th className="px-4 py-3.5 text-center">Days Renewed</th>
+                        <th className="px-4 py-3.5 font-bold">Renewed Till</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-150 bg-white">
+                      {displayedInterestDetails.map((detail) => (
+                        <tr key={detail.id} className="hover:bg-gray-50/60 transition-colors">
+                          <td className="px-4 py-3.5 font-bold text-slate-800">{formatDateOld(detail.entry_date)}</td>
+                          <td className="px-4 py-3.5 text-right text-green-800 font-black text-sm">
+                            ₹{Number(detail.credit).toLocaleString('en-IN')}
+                          </td>
+                          <td className="px-4 py-3.5 font-mono text-slate-900 font-black">{detail.receipt_no || '-'}</td>
+                          <td className="px-4 py-3.5 font-black text-slate-950">{detail.row_type || '-'}</td>
+                          <td className="px-4 py-3.5 text-slate-700 font-bold" title={detail.particulars}>{detail.particulars || '-'}</td>
+                          <td className="px-4 py-3.5 text-center font-black text-slate-900">{detail.renewed_days > 0 ? `${detail.renewed_days} Days` : '-'}</td>
+                          <td className="px-4 py-3.5 font-bold text-slate-800">{detail.renewed_till_date ? formatDateOld(detail.renewed_till_date) : '-'}</td>
+                        </tr>
+                      ))}
+                      {displayedInterestDetails.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="text-center py-8 text-gray-400 italic">No interest details found for this loan</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {activeLogTab === 'payment' && (
+                <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
+                  <table className="w-full text-[13px] text-left min-w-[1000px]">
+                    <thead>
+                      <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
+                        <th className="w-10 px-4 py-3.5"></th>
+                        <th className="px-4 py-3.5">Date</th>
+                        <th className="px-4 py-3.5">Receipt No</th>
+                        <th className="px-4 py-3.5">Transaction Type</th>
+                        <th className="px-4 py-3.5 text-right">Amount Paid</th>
+                        <th className="px-4 py-3.5">User</th>
+                        <th className="px-4 py-3.5 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-150 bg-white">
+                      {loanTransactions
+                        .filter((tx: any) => tx.type === 'Collection')
+                        .map((tx: any) => {
+                          const isTxEditable = user?.is_admin || (() => {
+                            const txCreatedAt = new Date(tx.created_at || tx.date).getTime();
+                            const now = Date.now();
+                            const diffHours = (now - txCreatedAt) / (1000 * 60 * 60);
+                            return diffHours <= 24;
+                          })();
+                          
+                          const isExpanded = expandedTxIds.has(tx.id);
+                          
+                          // Allocation details from cdLedgerEntries:
+                          const txAllocations = cdLedgerEntries.filter(
+                            (entry) => entry.receipt_no === tx.receipt_no
+                          );
+                          const principalAllocation = txAllocations
+                            .filter((e) => (e.account_name || '').toUpperCase() === 'CD A/C' || e.entry_type === 'principal_payment')
+                            .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+                          const interestAllocation = txAllocations
+                            .filter((e) => (e.account_name || '').toUpperCase() === 'CD COMMISSION A/C' || e.entry_type === 'interest_payment')
+                            .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+                          const penaltyAllocation = txAllocations
+                            .filter((e) => (e.account_name || '').toUpperCase() === 'PENALTY A/C' || e.entry_type === 'penalty_payment')
+                            .reduce((sum, e) => sum + Number(e.credit || 0), 0);
+
+                          const isPending = tx.receipt_no && tx.receipt_no !== '-' && pendingReviews?.some(r => r?.receipt_number === tx.receipt_no && r?.loan_id === selectedLoan?.id);
+                          
+                          return (
+                            <React.Fragment key={tx.id}>
+                              <tr className={`hover:bg-gray-50/60 transition-colors ${isPending ? 'bg-[#fff7ed]' : ''}`}>
+                                <td className="px-4 py-3.5 text-center">
+                                  <button 
+                                    onClick={() => toggleExpandTx(tx.id)}
+                                    className="p-1 hover:bg-gray-100 rounded transition-colors text-slate-500 hover:text-slate-900 focus:outline-none"
+                                  >
+                                    {isExpanded ? (
+                                      <ChevronDown className="w-4 h-4" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4" />
+                                    )}
+                                  </button>
+                                </td>
+                                <td className="px-4 py-3.5 font-bold text-slate-800">{formatDateOld(tx.date)}</td>
+                                <td className="px-4 py-3.5 font-mono text-slate-900 font-black">
+                                  {tx.receipt_no || '-'}
+                                  {isPending && (
+                                    <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold bg-orange-50 text-orange-700 border border-orange-200 uppercase tracking-wide">
+                                      Pending Approval
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3.5 font-black text-slate-950">CD Amount Paid</td>
+                                <td className="px-4 py-3.5 text-right text-green-800 font-black text-sm">
+                                  ₹{Number(tx.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                </td>
+                                <td className="px-4 py-3.5 text-slate-800 font-bold">{tx.collected_by || 'Staff'}</td>
+                                <td className="px-4 py-3.5">
+                                  <div className="flex items-center justify-center gap-2">
+                                    {isTxEditable ? (
+                                      <button
+                                        onClick={() => handleOpenEditTxModal(tx)}
+                                        className="p-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-900 rounded-lg transition-colors border border-indigo-200"
+                                        title="Edit Transaction"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    ) : (
+                                      <span className="text-gray-400 text-xs italic bg-gray-50 px-2 py-0.5 rounded border border-gray-150" title={isPending ? "Pending approval review" : "Editable only within 24 hours"}>
+                                        {isPending ? 'Pending' : 'ReadOnly'}
+                                      </span>
+                                    )}
+                                    {user?.is_admin && (
+                                      <button
+                                        onClick={() => handleDeleteTx(tx)}
+                                        className="p-1.5 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-900 rounded-lg transition-colors border border-rose-200"
+                                        title="Delete Transaction"
+                                      >
+                                        <X className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                              {isExpanded && (
+                                <tr className="bg-slate-50/60">
+                                  <td colSpan={7} className="px-12 py-3.5 text-xs text-slate-600 border-t border-gray-100">
+                                    <div className="font-bold text-slate-850 mb-2">Allocation:</div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pl-4 font-bold">
+                                      <div>
+                                        <span className="text-slate-500 uppercase font-black tracking-wider text-[10px] block mb-0.5">CD Interest</span>
+                                        <span className="text-sm font-black text-slate-900">
+                                          ₹{interestAllocation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 uppercase font-black tracking-wider text-[10px] block mb-0.5">CD Penalty</span>
+                                        <span className="text-sm font-black text-slate-900">
+                                          ₹{penaltyAllocation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 uppercase font-black tracking-wider text-[10px] block mb-0.5">CD Principal</span>
+                                        <span className="text-sm font-black text-slate-900">
+                                          ₹{principalAllocation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      {loanTransactions.filter((tx: any) => tx.type === 'Collection').length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="text-center py-8 text-slate-500 font-bold italic">No collection transactions found for this loan</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {activeLogTab === 'editHistory' && (
+                <div className="overflow-x-auto max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
+                  <table className="w-full text-[13px] text-left min-w-[1000px]">
+                    <thead>
+                      <tr className="bg-gray-100 text-slate-955 uppercase tracking-wider text-[11px] font-black border-b border-gray-200">
+                        <th className="px-4 py-3.5">Edited At</th>
+                        <th className="px-4 py-3.5">Edited By</th>
+                        <th className="px-4 py-3.5">Receipt No</th>
+                        <th className="px-4 py-3.5 text-right">Original Date</th>
+                        <th className="px-4 py-3.5 text-right">New Date</th>
+                        <th className="px-4 py-3.5 text-right">Original Amt</th>
+                        <th className="px-4 py-3.5 text-right">New Amt</th>
+                        <th className="px-4 py-3.5">Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-150 bg-white">
+                      {editLogs.map((log: any) => {
+                        const oldD = log.old_data || {};
+                        const newD = log.new_data || {};
+                        return (
+                          <tr key={log.id} className="hover:bg-gray-50/60 transition-colors">
+                            <td className="px-4 py-3.5 font-bold text-slate-800">
+                              {new Date(log.edited_at).toLocaleString('en-IN')}
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-800 font-bold">{log.edited_by}</td>
+                            <td className="px-4 py-3.5 font-mono text-slate-900 font-black">
+                              {newD.receipt_no || oldD.receipt_no || '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right font-bold text-slate-600">
+                              {oldD.date ? oldD.date.split('T')[0].split('-').reverse().join('/') : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right font-bold text-slate-800">
+                              {newD.date ? newD.date.split('T')[0].split('-').reverse().join('/') : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right text-slate-700">
+                              {oldD.amount !== undefined ? `₹${Number(oldD.amount).toLocaleString('en-IN')}` : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-right text-green-800 font-black">
+                              {newD.amount !== undefined ? `₹${Number(newD.amount).toLocaleString('en-IN')}` : '-'}
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-700 font-bold" title={log.reason}>
+                              {log.reason || '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {editLogs.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="text-center py-8 text-gray-400 italic">No transaction edit history found</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Card>
+            
+            {/* Submitted Files & Media */}
+            <Card
+              title={<span className="text-base font-extrabold text-slate-955 block">Submitted Files &amp; Media</span>}
+              className="shadow-sm border-gray-100 rounded-3xl print:hidden animate-none"
+            >
+              <div className="space-y-2.5">
+                <div className="flex gap-2 p-2 bg-gray-50 border border-gray-150 rounded-xl items-center">
+                  <select
+                    value={docType}
+                    onChange={(e) => setDocType(e.target.value)}
+                    disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
+                    className="flex-1 text-[13px] bg-white border border-gray-250 p-1.5 rounded-lg focus:outline-none font-sans font-bold text-slate-900"
+                  >
+                    <option value="Pledge Document">Pledge Document</option>
+                    <option value="Aadhaar Card Copy">Aadhaar Card Copy</option>
+                    <option value="PAN Card Copy">PAN Card Copy</option>
+                    <option value="Land Registry Copy">Land Registry Copy</option>
+                    <option value="Other Attachment">Other Attachment</option>
+                  </select>
+                  <label className={`bg-green-600 hover:bg-green-700 text-white px-2.5 py-1.5 rounded-lg text-[13px] font-bold cursor-pointer select-none ${(selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED') ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}>
+                    {uploadingDoc ? 'Uploading...' : 'Upload'}
+                    <input
+                      type="file"
+                      onChange={handleUploadDocument}
+                      disabled={uploadingDoc || selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {aggregatedDocs.map((doc) => (
+                    <div key={doc.id} className="flex justify-between items-center py-2.5 text-[13px] font-semibold text-slate-800">
+                      <div className="flex flex-col flex-1 min-w-0 pr-2">
+                        <span className="font-extrabold text-slate-900 truncate">{doc.name}</span>
+                        <span className="text-[12px] font-medium text-gray-500 truncate">{doc.remarks}</span>
+                      </div>
+                      <div className="flex items-center gap-3.5 font-sans">
+                        <span className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold ${doc.returnedStatus === 'Returned' ? 'bg-blue-50 text-blue-700' : 'bg-green-50 text-green-700'}`}>
+                          {doc.returnedStatus}
+                        </span>
+                        {doc.fileUrl ? (
+                          <a href={doc.fileUrl} target="_blank" rel="noreferrer" className="text-green-700 hover:underline font-extrabold text-[13px]">View</a>
+                        ) : null}
+                        {doc.allowDelete ? (
+                          <button
+                            onClick={() => handleDeleteDocument(doc.id)}
+                            disabled={selectedLoan.status === 'Closed' || selectedLoan.status === 'NPA_CLOSED'}
+                            className="text-red-500 hover:text-red-700 font-bold ml-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                  {aggregatedDocs.length === 0 ? (
+                    <p className="text-center text-gray-400 italic py-4">No documents or files found</p>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
 
             {/* Totals Summary Footer Card & Buttons */}
             <div className="bg-white px-5 py-4 rounded-3xl border border-gray-100 shadow-sm flex flex-col gap-3">
@@ -2807,11 +2852,10 @@ const CDLedger: React.FC = () => {
                 {/* Present Balance */}
                 <div className="flex flex-col min-w-[90px]">
                   <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest leading-none mb-1">Present Bal.</span>
-                  <span className={`text-sm font-black font-mono tabular-nums transition-colors duration-300 ${
-                    bottomTotals.presentBalance <= 0 ? 'text-slate-300'
+                  <span className={`text-sm font-black font-mono tabular-nums transition-colors duration-300 ${bottomTotals.presentBalance <= 0 ? 'text-slate-300'
                     : bottomTotals.presentBalance < bottomTotals.totalDebit * 0.25 ? 'text-emerald-600'
-                    : 'text-amber-700'
-                  }`}>
+                      : 'text-amber-700'
+                    }`}>
                     ₹{bottomTotals.presentBalance.toLocaleString('en-IN')}
                   </span>
                 </div>
@@ -2851,11 +2895,10 @@ const CDLedger: React.FC = () => {
                       </span>
                     )}
                   </span>
-                  <span className={`text-sm font-black font-mono tabular-nums transition-colors duration-300 ${
-                    bottomTotals.paidDues <= 0 ? 'text-slate-300'
+                  <span className={`text-sm font-black font-mono tabular-nums transition-colors duration-300 ${bottomTotals.paidDues <= 0 ? 'text-slate-300'
                     : bottomTotals.pendingDues <= 0 ? 'text-emerald-600'
-                    : 'text-emerald-700'
-                  }`}>
+                      : 'text-emerald-700'
+                    }`}>
                     ₹{bottomTotals.paidDues.toLocaleString('en-IN')}
                   </span>
                 </div>
@@ -2907,16 +2950,16 @@ const CDLedger: React.FC = () => {
                   NPA Close
                 </Button>
 
-                <Button 
-                  onClick={handleRefresh} 
-                  variant="secondary" 
-                  size="sm" 
+                <Button
+                  onClick={handleRefresh}
+                  variant="secondary"
+                  size="sm"
                   icon={RefreshCw}
                   className="rounded-xl border-gray-200 text-xs py-2 px-4"
                 >
                   Refresh
                 </Button>
-                
+
                 <Button
                   onClick={() => handleExport('xlsx')}
                   variant="secondary"
@@ -2941,214 +2984,201 @@ const CDLedger: React.FC = () => {
         title="Print Preview (A4 Friendly Layout)"
         documentTitle="CD Daily Loan Ledger Report Card"
       >
-        {selectedLoan && renewCalculations && (
-          <div className="space-y-6 text-gray-800 font-sans text-xs">
-            <div className="text-center border-b-2 border-double border-gray-300 pb-4">
-              <h1 className="text-xl font-black text-gray-900 tracking-wide uppercase">Thirumala Finance Groups</h1>
-              <span className="text-xs text-gray-500 uppercase tracking-widest block font-medium">CD Daily Loan Ledger statement</span>
-              <div className="flex justify-between items-center text-gray-400 mt-4 font-mono text-[9px]">
-                <span>PRINTED: {new Date().toLocaleString('en-IN').replace(/\s/g, '')}</span>
-                <span>A/C ID: {selectedLoan.loan_id}</span>
-              </div>
-            </div>
+        {selectedLoan && renewCalculations && (() => {
+          const borrowerPhotoUrl = selectedLoan.customer?.customer_photo_url || selectedLoan.customer_photo_url;
+          const guarantor1PhotoUrl = guarantor1?.photo_url || guarantor1?.customer_photo_url || selectedLoan.surety_photo_url;
+          const guarantor2PhotoUrl = guarantor2?.photo_url || guarantor2?.customer_photo_url;
 
-            <div className="grid grid-cols-2 gap-6 border-b pb-6">
-              <div className="space-y-1.5">
-                <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Borrower Details</h4>
-                <table className="w-full text-left text-xs leading-loose">
-                  <tbody>
-                    <tr>
-                      <td className="text-gray-400 w-24">Name:</td>
-                      <td className="text-gray-900 font-bold">{selectedLoan.customer?.name}</td>
+          return (
+            <div className="space-y-6 text-gray-850 font-sans text-xs p-1">
+              {/* Header: A/C Number & Customer Name prominent once */}
+              <div className="flex justify-between items-start border-b-2 border-double border-gray-300 pb-4">
+                <div>
+                  <h1 className="text-xl font-black text-gray-900 tracking-wide uppercase">Thirumala Finance Groups</h1>
+                  <span className="text-xs text-gray-500 uppercase tracking-widest block font-medium">CD Daily Loan Ledger statement</span>
+                </div>
+                <div className="text-right">
+                  <div className="text-lg font-black text-green-700 bg-green-50 px-3 py-1.5 rounded-xl border border-green-200 inline-block font-mono">
+                    A/C: {selectedLoan.loan_id}
+                  </div>
+                  <div className="text-xs text-gray-500 font-extrabold uppercase mt-1">
+                    CUSTOMER: {selectedLoan.customer?.name}
+                  </div>
+                  <div className="text-[9px] text-gray-400 mt-0.5">
+                    OPERATOR: {user?.username || 'RAMESH'} | PRINTED: {new Date().toLocaleString('en-IN').replace(/\s/g, '')}
+                  </div>
+                </div>
+              </div>
+
+              {/* People Profiles: Borrower, Surety 1, Surety 2 with photos next to details */}
+              <div className="grid grid-cols-3 gap-4 border-b pb-4">
+                {/* Borrower details */}
+                <div className="p-3 bg-gray-50/50 rounded-2xl border border-gray-100 flex gap-3">
+                  <div className="flex-1 space-y-1 text-[10px] font-sans">
+                    <span className="text-[10px] font-black uppercase text-green-800 tracking-wider block border-b pb-0.5 mb-1.5">Borrower Details</span>
+                    <div className="flex justify-between"><span className="text-gray-400">Name:</span> <span className="font-extrabold text-gray-900">{selectedLoan.customer?.name}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-400">S/o W/o:</span> <span className="font-bold text-gray-800">{selectedLoan.customer?.father_husband_name || 'N/A'}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-400">Phone:</span> <span className="font-bold text-gray-800">{selectedLoan.customer?.phone || 'N/A'}</span></div>
+                    {selectedLoan.customer?.phone2 && (
+                      <div className="flex justify-between"><span className="text-gray-400">Phone 2:</span> <span className="font-bold text-gray-800">{selectedLoan.customer?.phone2}</span></div>
+                    )}
+                    <div className="flex justify-between"><span className="text-gray-400">Aadhaar:</span> <span className="font-bold text-gray-800 font-mono">{selectedLoan.customer?.aadhaar || 'N/A'}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-400">Address:</span> <span className="font-bold text-gray-800 truncate max-w-[80px]" title={selectedLoan.customer?.address || undefined}>{selectedLoan.customer?.address || 'N/A'}</span></div>
+                  </div>
+                  <div className="w-14 h-18 shrink-0 rounded-lg bg-white border border-gray-250 overflow-hidden flex items-center justify-center relative shadow-sm">
+                    {borrowerPhotoUrl ? (
+                      <img src={borrowerPhotoUrl} alt="Borrower" className="w-full h-full object-cover" />
+                    ) : (
+                      <User className="w-5 h-5 text-gray-300" />
+                    )}
+                  </div>
+                </div>
+
+                {/* Guarantor 1 details */}
+                <div className="p-3 bg-gray-50/50 rounded-2xl border border-gray-100 flex gap-3">
+                  <div className="flex-1 space-y-1 text-[10px] font-sans">
+                    <span className="text-[10px] font-black uppercase text-green-800 tracking-wider block border-b pb-0.5 mb-1.5">Guarantor 1 Details</span>
+                    {guarantor1 ? (
+                      <>
+                        <div className="flex justify-between"><span className="text-gray-400">Name:</span> <span className="font-extrabold text-gray-900">{guarantor1.name}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Phone:</span> <span className="font-bold text-gray-800">{guarantor1.phone}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Aadhaar:</span> <span className="font-bold text-gray-800 font-mono">{guarantor1.aadhaar}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Address:</span> <span className="font-bold text-gray-800 truncate max-w-[80px]" title={guarantor1.address}>{guarantor1.address || 'N/A'}</span></div>
+                      </>
+                    ) : (
+                      <span className="text-gray-450 italic block py-2">No guarantor 1</span>
+                    )}
+                  </div>
+                  {guarantor1 && (
+                    <div className="w-14 h-18 shrink-0 rounded-lg bg-white border border-gray-250 overflow-hidden flex items-center justify-center relative shadow-sm">
+                      {guarantor1PhotoUrl ? (
+                        <img src={guarantor1PhotoUrl} alt="Guarantor 1" className="w-full h-full object-cover" />
+                      ) : (
+                        <User className="w-5 h-5 text-gray-300" />
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Guarantor 2 details */}
+                <div className="p-3 bg-gray-50/50 rounded-2xl border border-gray-100 flex gap-3">
+                  <div className="flex-1 space-y-1 text-[10px] font-sans">
+                    <span className="text-[10px] font-black uppercase text-green-800 tracking-wider block border-b pb-0.5 mb-1.5">Guarantor 2 Details</span>
+                    {guarantor2 ? (
+                      <>
+                        <div className="flex justify-between"><span className="text-gray-400">Name:</span> <span className="font-extrabold text-gray-900">{guarantor2.name}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Phone:</span> <span className="font-bold text-gray-800">{guarantor2.phone}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Aadhaar:</span> <span className="font-bold text-gray-800 font-mono">{guarantor2.aadhaar}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-400">Address:</span> <span className="font-bold text-gray-800 truncate max-w-[80px]" title={guarantor2.address}>{guarantor2.address || 'N/A'}</span></div>
+                      </>
+                    ) : (
+                      <span className="text-gray-450 italic block py-2">No guarantor 2</span>
+                    )}
+                  </div>
+                  {guarantor2 && (
+                    <div className="w-14 h-18 shrink-0 rounded-lg bg-white border border-gray-250 overflow-hidden flex items-center justify-center relative shadow-sm">
+                      {guarantor2PhotoUrl ? (
+                        <img src={guarantor2PhotoUrl} alt="Guarantor 2" className="w-full h-full object-cover" />
+                      ) : (
+                        <User className="w-5 h-5 text-gray-300" />
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Opening & Current Status separate details */}
+              <div className="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                <div className="space-y-1.5 text-[11px] font-sans">
+                  <span className="text-[10px] font-black uppercase text-slate-800 tracking-wider block border-b pb-1 mb-1.5">Opening Details</span>
+                  <div className="flex justify-between"><span className="text-slate-500">Loan Date (Inclusive):</span> <span className="font-extrabold text-slate-900">{formatDateOld(originalLoanDate || selectedLoan.date)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Opening Loan Principal:</span> <span className="font-extrabold text-slate-900">₹{originalLoanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Opening Interest/Commission:</span> <span className="font-extrabold text-slate-900">₹{(displayedStatementEntries.filter(e => e.entry_type === 'opening_commission' || e.entry_type === 'Commission').reduce((s, e) => s + Number(e.credit || 0), 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Document Charges Paid:</span> <span className="font-extrabold text-slate-900">₹{statementTotals.documentCharges.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                </div>
+                <div className="space-y-1.5 text-[11px] font-sans">
+                  <span className="text-[10px] font-black uppercase text-slate-800 tracking-wider block border-b pb-1 mb-1.5">Current Balance State</span>
+                  <div className="flex justify-between"><span className="text-slate-500">Current Principal Balance:</span> <span className="font-extrabold text-green-700">₹{ledgerMetrics.principalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Pending Accrued Interest:</span> <span className="font-extrabold text-orange-600">₹{ledgerMetrics.pendingInterest.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Pending Accrued Penalty:</span> <span className="font-extrabold text-red-650">₹{ledgerMetrics.pendingPenalty.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Current Next Due Date:</span> <span className="font-extrabold text-slate-900">{formatDateOld(renewCalculations?.dueDateStr)}</span></div>
+                </div>
+              </div>
+
+              {/* Grouped horizontal statement table */}
+              <div className="space-y-2">
+                <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Statement Ledger Payments</h4>
+                <table className="w-full border border-gray-300 text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-gray-100 border-b border-gray-300 text-gray-700 uppercase text-[9px] font-bold">
+                      <th className="p-2 border-r text-center">Sl No</th>
+                      <th className="p-2 border-r">Date</th>
+                      <th className="p-2 border-r">Receipt No</th>
+                      <th className="p-2 border-r text-right">Amount Paid</th>
+                      <th className="p-2 border-r text-right">Interest</th>
+                      <th className="p-2 border-r text-right">Penalty</th>
+                      <th className="p-2 border-r text-right">Principal</th>
+                      <th className="p-2 border-r">Particulars</th>
+                      <th className="p-2 border-r text-center">Days Renewed</th>
+                      <th className="p-2">Renewed Till</th>
                     </tr>
-                    <tr>
-                      <td className="text-gray-400">S/o / W/o:</td>
-                      <td className="text-gray-800 font-medium">{selectedLoan.customer?.father_husband_name || 'N/A'}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Phones:</td>
-                      <td className="text-gray-800 font-medium">
-                        {selectedLoan.customer?.phone || 'N/A'} {selectedLoan.customer?.phone2 ? `, ${selectedLoan.customer.phone2}` : ''}
+                  </thead>
+                  <tbody className="divide-y divide-gray-250 font-mono text-gray-700">
+                    {groupedPayments.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50/50">
+                        <td className="p-2 border-r text-center font-sans text-slate-500">{idx + 1}</td>
+                        <td className="p-2 border-r font-sans">{formatDateOld(row.date)}</td>
+                        <td className="p-2 border-r font-black text-slate-900">{row.receipt_no || '-'}</td>
+                        <td className="p-2 border-r text-right font-black text-slate-950">
+                          {row.amountPaid > 0 ? `₹${row.amountPaid.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="p-2 border-r text-right text-green-800 font-bold">
+                          {row.interest > 0 ? `₹${row.interest.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="p-2 border-r text-right text-red-650 font-bold">
+                          {row.penalty > 0 ? `₹${row.penalty.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="p-2 border-r text-right text-indigo-750 font-bold">
+                          {row.principal > 0 ? `₹${row.principal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td className="p-2 border-r font-sans text-gray-600 font-bold">{row.particulars}</td>
+                        <td className="p-2 border-r text-center font-black text-slate-800">{row.daysRenewed > 0 ? `${row.daysRenewed} Days` : '-'}</td>
+                        <td className="p-2 font-sans font-bold">{row.renewedTill ? formatDateOld(row.renewedTill) : '-'}</td>
+                      </tr>
+                    ))}
+                    {groupedPayments.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="text-center py-6 font-sans text-gray-400 italic">No payments logged</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 font-black border-t-2 border-slate-350 text-slate-900">
+                      <td colSpan={3} className="p-2 border-r text-right font-sans">GRAND TOTALS:</td>
+                      <td className="p-2 border-r text-right font-black">₹{statementTotals.amountPaid.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className="p-2 border-r text-right text-green-800">₹{statementTotals.interest.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className="p-2 border-r text-right text-red-650">₹{statementTotals.penalty.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className="p-2 border-r text-right text-indigo-750">₹{statementTotals.principal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td colSpan={3} className="p-2 font-sans text-[10px] text-slate-600 font-bold">
+                        Pledged Document Status: {documentReturned ? 'Returned' : 'Submitted'}
                       </td>
                     </tr>
-                    <tr>
-                      <td className="text-gray-400">Aadhaar:</td>
-                      <td className="text-gray-800 font-medium">{selectedLoan.customer?.aadhaar || 'N/A'}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Partner:</td>
-                      <td className="text-gray-800 font-medium">{selectedLoan.customer?.partner_name || 'N/A'}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Address:</td>
-                      <td className="text-gray-750 font-medium text-[11px] leading-relaxed">{selectedLoan.customer?.address || 'N/A'}</td>
-                    </tr>
-                  </tbody>
+                  </tfoot>
                 </table>
               </div>
 
-              <div className="space-y-1.5">
-                <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Loan terms</h4>
-                <table className="w-full text-left text-xs leading-loose">
-                  <tbody>
-                    <tr>
-                      <td className="text-gray-400 w-28">Original Loan:</td>
-                      <td className="text-gray-900 font-bold">₹{originalLoanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Remaining Bal:</td>
-                      <td className="text-gray-900 font-bold">₹{ledgerMetrics.principalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Rate / Penalty:</td>
-                      <td className="text-gray-800 font-medium">{selectedLoan.interest_rate || 3}% / {selectedLoan.penalty_percent || 0.75}%</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Present Interest:</td>
-                      <td className="text-gray-900 font-bold text-orange-600">₹{ledgerMetrics.pendingInterest.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Present Penalty:</td>
-                      <td className="text-gray-900 font-bold text-red-650">₹{ledgerMetrics.pendingPenalty.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-gray-400">Loan Date:</td>
-                      <td className="text-gray-800 font-medium">{formatDateOld(selectedLoan.date)}</td>
-                    </tr>
-                  </tbody>
-                </table>
+              {/* Print Signatures */}
+              <div className="pt-16 grid grid-cols-2 gap-20 text-center text-gray-500 text-[10px] font-semibold">
+                <div>
+                  <div className="border-t border-gray-300 pt-1.5 w-32 mx-auto">Borrower Signature</div>
+                </div>
+                <div>
+                  <div className="border-t border-gray-300 pt-1.5 w-32 mx-auto">Auditor Signature</div>
+                </div>
               </div>
             </div>
-
-            {/* Guarantors */}
-            <div className="border-b pb-6 space-y-2">
-              <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Guarantor Profiles</h4>
-              <div className="grid grid-cols-2 gap-4">
-                {guarantor1 ? (
-                  <div>
-                    <h5 className="font-bold text-gray-800 mb-1 text-xs">Guarantor 1:</h5>
-                    <table className="w-full text-left leading-normal text-xs">
-                      <tbody>
-                        <tr>
-                          <td className="text-gray-400 w-20">Name:</td>
-                          <td className="text-gray-900 font-medium">{guarantor1.name}</td>
-                        </tr>
-                        <tr>
-                          <td className="text-gray-400">Phone:</td>
-                          <td className="text-gray-800 font-medium">{guarantor1.phone}</td>
-                        </tr>
-                        <tr>
-                          <td className="text-gray-400">Aadhaar:</td>
-                          <td className="text-gray-800 font-medium">{guarantor1.aadhaar}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-
-                {guarantor2 ? (
-                  <div>
-                    <h5 className="font-bold text-gray-800 mb-1 text-xs">Guarantor 2:</h5>
-                    <table className="w-full text-left leading-normal text-xs">
-                      <tbody>
-                        <tr>
-                          <td className="text-gray-400 w-20">Name:</td>
-                          <td className="text-gray-900 font-medium">{guarantor2.name}</td>
-                        </tr>
-                        <tr>
-                          <td className="text-gray-400">Phone:</td>
-                          <td className="text-gray-800 font-medium">{guarantor2.phone}</td>
-                        </tr>
-                        <tr>
-                          <td className="text-gray-400">Aadhaar:</td>
-                          <td className="text-gray-800 font-medium">{guarantor2.aadhaar}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            {/* Interest details */}
-            <div className="space-y-2">
-              <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Interest & Penalty logs</h4>
-              <table className="w-full border border-gray-200 text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[9px] font-bold">
-                    <th className="p-2 border-r">Date</th>
-                    <th className="p-2 border-r text-right">Credit</th>
-                    <th className="p-2 border-r">Receipt No</th>
-                    <th className="p-2 border-r">Type</th>
-                    <th className="p-2 border-r">Particulars</th>
-                    <th className="p-2 border-r text-center">Days Renewed</th>
-                    <th className="p-2">Renewed Till</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-250 font-mono text-gray-700">
-                  {displayedInterestDetails.map((detail) => (
-                    <tr key={detail.id}>
-                      <td className="p-2 border-r font-sans">{formatDateOld(detail.entry_date)}</td>
-                      <td className="p-2 border-r text-right text-green-700 font-semibold">₹{Number(detail.credit).toLocaleString('en-IN')}</td>
-                      <td className="p-2 border-r text-gray-500">{detail.receipt_no || '-'}</td>
-                      <td className="p-2 border-r font-sans text-gray-700">{detail.row_type || '-'}</td>
-                      <td className="p-2 border-r text-gray-500 font-sans">{detail.particulars || '-'}</td>
-                      <td className="p-2 border-r text-center font-bold text-gray-800">{detail.renewed_days > 0 ? `${detail.renewed_days} Days` : '-'}</td>
-                      <td className="p-2 font-sans">{detail.renewed_till_date ? formatDateOld(detail.renewed_till_date) : '-'}</td>
-                    </tr>
-                  ))}
-                  {displayedInterestDetails.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="text-center py-4 font-sans text-gray-400 italic">No details found</td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Statement table */}
-            <div className="space-y-2">
-              <h4 className="text-green-800 border-b pb-1 text-[10px] font-bold uppercase tracking-wider">Statement Ledgers</h4>
-              <table className="w-full border border-gray-200 text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[9px] font-bold">
-                    <th className="p-2 border-r">Date</th>
-                    <th className="p-2 border-r">A/C Name</th>
-                    <th className="p-2 border-r text-right">Credit</th>
-                    <th className="p-2 border-r text-right">Debit</th>
-                    <th className="p-2 border-r">User</th>
-                    <th className="p-2 border-r">Receipt No</th>
-                    <th className="p-2">Particulars</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-250 font-mono text-gray-700">
-                  {displayedStatementEntries.map((tx) => (
-                    <tr key={tx.id}>
-                      <td className="p-2 border-r font-sans">{formatDateOld(tx.entry_date)}</td>
-                      <td className="p-2 border-r font-sans font-bold text-gray-900">{tx.account_name || 'CD A/C'}</td>
-                      <td className="p-2 border-r text-right text-green-705 font-bold">{tx.credit > 0 ? `₹${Number(tx.credit).toLocaleString('en-IN')}` : '-'}</td>
-                      <td className="p-2 border-r text-right text-red-705 font-bold">{tx.debit > 0 ? `₹${Number(tx.debit).toLocaleString('en-IN')}` : '-'}</td>
-                      <td className="p-2 border-r font-sans text-gray-700">{tx.user_name || 'Staff'}</td>
-                      <td className="p-2 border-r text-gray-500">{tx.receipt_no || '-'}</td>
-                      <td className="p-2 text-gray-500 font-sans">{tx.particulars || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Print Signatures */}
-            <div className="pt-20 grid grid-cols-2 gap-20 text-center text-gray-500 text-[10px] font-semibold">
-              <div>
-                <div className="border-t border-gray-300 pt-1.5 w-32 mx-auto">Borrower Signature</div>
-              </div>
-              <div>
-                <div className="border-t border-gray-300 pt-1.5 w-32 mx-auto">Auditor Signature</div>
-              </div>
-            </div>
-
-          </div>
-        )}
+          );
+        })()}
       </FinancePrintPreview>
 
       {/* NPA Close Account Modal */}
@@ -3168,20 +3198,20 @@ const CDLedger: React.FC = () => {
                 <p>Are you sure you want to close this account under NPA? This will mark the loan status as Closed with NPA designation and permanently record the settlement and waived amounts.</p>
               </div>
               <div>
-                <Input 
-                  label="Settlement Amount Collected" 
+                <Input
+                  label="Settlement Amount Collected"
                   type="number"
-                  value={npaSettlementAmount} 
-                  onChange={setNpaSettlementAmount} 
+                  value={npaSettlementAmount}
+                  onChange={setNpaSettlementAmount}
                   placeholder="Enter settlement amount collected"
                   required
                 />
               </div>
               <div>
-                <Input 
-                  label="Reason / Remarks" 
-                  value={npaReason} 
-                  onChange={v => setNpaReason(v.toUpperCase())} 
+                <Input
+                  label="Reason / Remarks"
+                  value={npaReason}
+                  onChange={v => setNpaReason(v.toUpperCase())}
                   placeholder="Enter reason/remarks for NPA closure"
                   required
                 />
@@ -3213,7 +3243,7 @@ const CDLedger: React.FC = () => {
             <div className="space-y-4">
               <div>
                 <label className="finance-caption uppercase mb-2 block">Return Date</label>
-                <input 
+                <input
                   type="date"
                   value={returnDate}
                   onChange={(e) => setReturnDate(e.target.value)}
@@ -3221,16 +3251,16 @@ const CDLedger: React.FC = () => {
                 />
               </div>
               <div>
-                <Input 
-                  label="Returned To (Name)" 
-                  value={returnedTo} 
-                  onChange={setReturnedTo} 
+                <Input
+                  label="Returned To (Name)"
+                  value={returnedTo}
+                  onChange={setReturnedTo}
                   placeholder="Person receiving documents"
                 />
               </div>
               <div>
                 <label className="finance-caption uppercase mb-2 block">Receiver Signature / Photo</label>
-                <input 
+                <input
                   type="file"
                   onChange={(e) => setReturnSignature(e.target.files?.[0] || null)}
                   className="w-full bg-white border border-gray-200 rounded-xl p-2 text-sm text-gray-800"
@@ -3245,6 +3275,102 @@ const CDLedger: React.FC = () => {
                 </Button>
                 <Button onClick={handleReturnDocSubmit} variant="primary" className="flex-1 bg-blue-600 hover:bg-blue-700 border-0 text-white rounded-xl" disabled={isReturningDoc || !returnedTo.trim()}>
                   {isReturningDoc ? 'Saving...' : 'Confirm Return'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Transaction Modal */}
+      {showEditTxModal && editingTx && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-xl relative">
+            <button onClick={() => setShowEditTxModal(false)} className="absolute right-4 top-4 text-gray-400 hover:text-gray-600">
+              <X className="w-5 h-5" />
+            </button>
+            <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+              <CreditCard className="w-6 h-6 text-indigo-600" />
+              Edit Payment Transaction
+            </h2>
+            <div className="space-y-4">
+              {/* Original Snapshot Panel */}
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-xs space-y-2">
+                <div className="font-semibold text-slate-500 uppercase tracking-wider text-[10px]">Original Transaction Snapshot</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <div className="text-slate-400">Receipt No</div>
+                    <div className="font-bold font-mono text-slate-800">{editingTx.receipt_no || '-'}</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400">Payment Date</div>
+                    <div className="font-bold text-slate-800">
+                      {editingTx.date ? new Date(editingTx.date).toLocaleDateString('en-IN') : '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400">Amount Paid</div>
+                    <div className="font-bold text-slate-800">
+                      ₹{Number(editingTx.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <Input 
+                  label="New Receipt Number" 
+                  value={editTxReceiptNo} 
+                  onChange={setEditTxReceiptNo} 
+                  placeholder="Receipt number (e.g. RC150)"
+                  required
+                />
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="finance-caption uppercase mb-2 block font-sans">New Payment Date</label>
+                  <input 
+                    type="date"
+                    value={editTxDate}
+                    onChange={(e) => setEditTxDate(e.target.value)}
+                    className="w-full bg-white border border-gray-200 rounded-xl p-2.5 text-gray-800 focus:ring-2 focus:ring-green-500 focus:outline-none"
+                    required
+                  />
+                </div>
+                <div>
+                  <Input 
+                    label="New Payment Amount (₹)" 
+                    value={editTxAmount} 
+                    onChange={setEditTxAmount} 
+                    placeholder="Amount paid"
+                    type="number"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <Input 
+                  label="Reason for Edit (Mandatory)" 
+                  value={editTxReason} 
+                  onChange={setEditTxReason} 
+                  placeholder="e.g. Wrong amount entered, Cash correction"
+                  required
+                />
+              </div>
+              
+              <div className="pt-4 flex gap-3">
+                <Button onClick={() => setShowEditTxModal(false)} variant="secondary" className="flex-1 rounded-xl">
+                  Cancel
+                </Button>
+                <Button 
+                  onClick={handleSaveEditTx} 
+                  variant="primary" 
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 border-0 text-white rounded-xl" 
+                  disabled={isSavingTx || !editTxReceiptNo.trim() || !editTxDate || !editTxAmount || !editTxReason.trim()}
+                >
+                  {isSavingTx ? 'Saving...' : 'Save Changes'}
                 </Button>
               </div>
             </div>

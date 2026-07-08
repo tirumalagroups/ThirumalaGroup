@@ -6,6 +6,7 @@ import { Printer, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react';
 import toast from 'react-hot-toast';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
 import { useNavigate } from 'react-router-dom';
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 
 interface DailyTransaction {
   id: string;
@@ -22,7 +23,7 @@ interface DailyTransaction {
 const DailyReportFinance: React.FC = () => {
   const navigate = useNavigate();
   // Default to today
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(() => getLocalBusinessDateISO());
   const [loading, setLoading] = useState(true);
   
   const [openingBalance, setOpeningBalance] = useState(0);
@@ -39,95 +40,52 @@ const DailyReportFinance: React.FC = () => {
   const handlePrevDay = () => {
     const d = new Date(selectedDate);
     d.setDate(d.getDate() - 1);
-    setSelectedDate(d.toISOString().split('T')[0]);
+    setSelectedDate(getLocalBusinessDateISO(d));
   };
 
   const handleNextDay = () => {
     const d = new Date(selectedDate);
     d.setDate(d.getDate() + 1);
-    setSelectedDate(d.toISOString().split('T')[0]);
+    setSelectedDate(getLocalBusinessDateISO(d));
   };
 
   const fetchDailyData = async () => {
     setLoading(true);
     try {
-      const allTx = await supabaseFinance.getTransactions();
-      const allCapital = await supabaseFinance.getCapitalEntries();
-      const allCashbook = await supabaseFinance.getCashbookEntries();
-      const allAccounts = await supabaseFinance.getCashbookAccounts();
+      const allUnified = await supabaseFinance.getUnifiedLedgerEntries();
 
       let opBal = 0;
       let dailyCred = 0;
       let dailyDeb = 0;
       const dailyTx: Omit<DailyTransaction, 'runningBalance'>[] = [];
 
-      const processDate = (
-        dateStr: string, 
-        creditAmt: number, 
-        debitAmt: number, 
-        timeStr: string,
-        item: Omit<DailyTransaction, 'runningBalance' | 'time' | 'credit' | 'debit'>
-      ) => {
-        if (dateStr < selectedDate) {
-          opBal += creditAmt;
-          opBal -= debitAmt;
-        } else if (dateStr === selectedDate) {
-          dailyCred += creditAmt;
-          dailyDeb += debitAmt;
+      allUnified.forEach(entry => {
+        const cred = Number(entry.credit) || 0;
+        const deb = Number(entry.debit) || 0;
+
+        if (entry.date < selectedDate) {
+          opBal += cred;
+          opBal -= deb;
+        } else if (entry.date === selectedDate) {
+          dailyCred += cred;
+          dailyDeb += deb;
+          
+          let source: 'Loan' | 'Capital' | 'Cashbook' = 'Cashbook';
+          if (entry.category === 'CAPITAL') source = 'Capital';
+          else if (['CD', 'HP', 'STBD', 'TBD'].includes(entry.category)) source = 'Loan';
+
           dailyTx.push({
-            ...item,
-            time: timeStr,
-            credit: creditAmt,
-            debit: debitAmt
+            id: entry.id,
+            source,
+            time: entry.date,
+            account: entry.head_of_account,
+            particulars: entry.particulars || `${cred > 0 ? 'Receipt' : 'Payment'} - ${entry.head_of_account} (${entry.account_number})`,
+            credit: cred,
+            debit: deb,
+            user: entry.user,
           });
         }
-      };
-
-      // 1. Process Loan Transactions
-      allTx.forEach(tx => {
-        const isCol = tx.type === 'Collection';
-        const amt = Number(tx.amount) || 0;
-        const cred = isCol ? amt : 0;
-        const deb = !isCol ? amt : 0;
-        processDate(tx.date, cred, deb, tx.created_at, {
-          id: tx.id,
-          source: 'Loan',
-          account: isCol ? 'Loan Collection' : 'Loan Disbursement',
-          particulars: `${tx.loan?.customer?.name || 'Customer'} (${tx.loan?.loan_id || 'N/A'}) - ${tx.remarks || 'No remarks'}`,
-          user: (tx as any).staff_name || 'Admin',
-        });
       });
-
-      // 2. Process Capital Entries
-      allCapital.forEach(cap => {
-        const cred = Number(cap.credit) || 0;
-        const deb = Number(cap.debit) || 0;
-        processDate(cap.entry_date, cred, deb, cap.created_at, {
-          id: cap.id,
-          source: 'Capital',
-          account: cred > 0 ? 'Capital Deposit' : 'Capital Withdraw',
-          particulars: `${cap.partner?.name || cap.partner_name || 'Partner'} - ${cap.particulars || 'No remarks'}`,
-          user: cap.created_by || 'Admin',
-        });
-      });
-
-      // 3. Process Cashbook Entries
-      allCashbook.forEach(cb => {
-        const cred = Number(cb.credit) || 0;
-        const deb = Number(cb.debit) || 0;
-        const accountObj = allAccounts.find(a => a.id === cb.head_of_account);
-        const accountName = accountObj?.account_name || 'General Cashbook';
-        processDate(cb.entry_date, cred, deb, cb.created_at, {
-          id: cb.id,
-          source: 'Cashbook',
-          account: accountName,
-          particulars: cb.particulars || '-',
-          user: cb.created_by || 'Admin',
-        });
-      });
-
-      // Sort chronological by time if available
-      dailyTx.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
       // Compute running balance
       let currentBal = opBal;

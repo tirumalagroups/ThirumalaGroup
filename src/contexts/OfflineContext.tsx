@@ -3,8 +3,11 @@ import { db } from '../lib/offlineQueueDB';
 import { supabaseDB } from '../lib/supabaseDatabase';
 import { syncAllMasterData } from '../lib/offlineMasterData';
 
+export type ConnectionStatus = 'ONLINE' | 'OFFLINE' | 'CHECKING' | 'BACKEND_ERROR';
+
 interface OfflineContextType {
   isOnline: boolean;
+  connectionStatus: ConnectionStatus;
   isSyncing: boolean;
   pendingCount: number;
   lastSyncAt: string | null;
@@ -18,7 +21,8 @@ interface OfflineContextType {
 const OfflineContext = createContext<OfflineContextType | undefined>(undefined);
 
 export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('CHECKING');
+  const [isOnline, setIsOnline] = useState<boolean>(true); // Assume online during CHECKING to avoid UI block
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [pendingCount, setPendingCount] = useState<number>(0);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(() => localStorage.getItem('last_sync_at'));
@@ -89,30 +93,86 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   };
 
-  useEffect(() => {
-    // Sync class instance properties to react states
-    supabaseDB.isOnline = navigator.onLine;
+  const checkConnectivity = async () => {
+    if (!navigator.onLine) {
+      setIsOnline(false);
+      supabaseDB.isOnline = false;
+      setConnectionStatus('OFFLINE');
+      const now = new Date().toISOString();
+      if (!localStorage.getItem('offline_since')) {
+        localStorage.setItem('offline_since', now);
+        setOfflineSince(now);
+      }
+      return;
+    }
 
-    const handleOnline = () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+      // Probe current domain favicon (fast, same-origin, no CORS)
+      await fetch(`${window.location.origin}/favicon.ico?_cb=${Date.now()}`, {
+        method: 'HEAD',
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+
+      clearTimeout(timeoutId);
+
       setIsOnline(true);
       supabaseDB.isOnline = true;
+      setConnectionStatus('ONLINE');
       localStorage.removeItem('offline_since');
       setOfflineSince(null);
-      
-      // Auto sync if enabled
-      if (autoSyncEnabled) {
-        triggerSync();
-      } else {
-        updateStats();
-      }
+    } catch (err: any) {
+      console.warn('[Network] Primary connectivity probe failed:', err);
 
-      // Sync master data cache
-      syncAllMasterData().catch(err => console.error('Error syncing master data cache:', err));
+      // Fallback check to Google to distinguish between local origin down vs. no internet
+      try {
+        const googleController = new AbortController();
+        const googleTimeoutId = setTimeout(() => googleController.abort(), 3500);
+
+        await fetch('https://clients3.google.com/generate_204', {
+          mode: 'no-cors',
+          signal: googleController.signal,
+          cache: 'no-store',
+        });
+
+        clearTimeout(googleTimeoutId);
+
+        // Google probe succeeded - we are online! Local origin/backend is down or DNS issue
+        setIsOnline(true);
+        supabaseDB.isOnline = true;
+        setConnectionStatus('BACKEND_ERROR');
+      } catch (gErr) {
+        console.warn('[Network] Fallback Google probe also failed:', gErr);
+        // Both probes failed, genuinely offline
+        setIsOnline(false);
+        supabaseDB.isOnline = false;
+        setConnectionStatus('OFFLINE');
+        const now = new Date().toISOString();
+        if (!localStorage.getItem('offline_since')) {
+          localStorage.setItem('offline_since', now);
+          setOfflineSince(now);
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    // Initial run
+    checkConnectivity();
+
+    const handleOnline = () => {
+      console.log('[Network] Browser online event received. Verifying actual internet...');
+      checkConnectivity();
     };
 
     const handleOffline = () => {
+      console.log('[Network] Browser offline event received.');
       setIsOnline(false);
       supabaseDB.isOnline = false;
+      setConnectionStatus('OFFLINE');
       const now = new Date().toISOString();
       localStorage.setItem('offline_since', now);
       setOfflineSince(now);
@@ -125,30 +185,44 @@ export const OfflineProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Initial operations
     updateStats();
     cleanUpRetentionHistory();
-    if (navigator.onLine) {
-      syncAllMasterData().catch(err => console.error('Error syncing master data cache:', err));
-    }
 
     const handleQueueChange = () => {
       updateStats();
     };
     window.addEventListener('offline-queue-changed', handleQueueChange);
 
-    // Periodically sync stats just in case
-    const interval = setInterval(updateStats, 5000);
+    // Periodically probe connectivity (every 10 seconds)
+    const probeInterval = setInterval(() => {
+      checkConnectivity();
+    }, 10000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('offline-queue-changed', handleQueueChange);
-      clearInterval(interval);
+      clearInterval(probeInterval);
     };
-  }, [autoSyncEnabled]);
+  }, []);
+
+  // Handle sync/master data load upon transitioning to ONLINE/BACKEND_ERROR
+  useEffect(() => {
+    if (connectionStatus === 'ONLINE' || connectionStatus === 'BACKEND_ERROR') {
+      if (autoSyncEnabled) {
+        triggerSync();
+      } else {
+        updateStats();
+      }
+
+      // Sync master data cache
+      syncAllMasterData().catch(err => console.error('Error syncing master data cache:', err));
+    }
+  }, [connectionStatus, autoSyncEnabled]);
 
   return (
     <OfflineContext.Provider
       value={{
         isOnline,
+        connectionStatus,
         isSyncing,
         pendingCount,
         lastSyncAt,

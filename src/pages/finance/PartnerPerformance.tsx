@@ -5,9 +5,6 @@ import { supabaseFinance } from '../../lib/supabaseFinance';
 import { Printer } from 'lucide-react';
 import toast from 'react-hot-toast';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
-import { financeLedgerSettingsService } from '../../services/financeLedgerSettingsService';
-import { financeCalculationService } from '../../services/financeCalculationService';
-
 interface PartnerPerfRow {
   id: string;
   name: string;
@@ -39,7 +36,6 @@ const PartnerPerformance: React.FC = () => {
       const capEntries = await supabaseFinance.getCapitalEntries();
       const loans = await supabaseFinance.getLoans();
       const txs = await supabaseFinance.getTransactions();
-      const ledgerSettings = await financeLedgerSettingsService.getAllLedgerSettings();
 
       // 1. Calculate net capital contributions per partner
       const partnerCapitals: Record<string, number> = {};
@@ -63,9 +59,7 @@ const PartnerPerformance: React.FC = () => {
       let accruedInterest = 0;
       loans.forEach(loan => {
         const P = Number(loan.amount);
-        const cat = loan.loan_category?.trim().toUpperCase() || 'CD';
-        const setting = ledgerSettings[cat] || ledgerSettings['CD'];
-        const I = setting ? financeCalculationService.calculateInterestFromSetting(P, Number(loan.duration_months) * 30, setting, Number(loan.duration_months)) : (P * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
+        const I = (P * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
         accruedInterest += I;
       });
 
@@ -76,9 +70,7 @@ const PartnerPerformance: React.FC = () => {
           const loan = loans.find(l => l.id === tx.loan_id);
           if (loan) {
             const P = Number(loan.amount);
-            const cat = loan.loan_category?.trim().toUpperCase() || 'CD';
-            const setting = ledgerSettings[cat] || ledgerSettings['CD'];
-            const I = setting ? financeCalculationService.calculateInterestFromSetting(P, Number(loan.duration_months) * 30, setting, Number(loan.duration_months)) : (P * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
+            const I = (P * (Number(loan.interest_rate) / 100) * Number(loan.duration_months));
             const totalRepayable = P + I;
             if (totalRepayable > 0) {
               const interestRatio = I / totalRepayable;

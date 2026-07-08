@@ -684,7 +684,7 @@ const EditEntry: React.FC = () => {
   const loadEntries = async () => {
     try {
       console.log('🔍 Loading entries from database...');
-      console.log('🔍 Supabase URL:', import.meta.env.VITE_SUPABASE_URL || 'https://pmqeegdmcrktccszgbwu.supabase.co');
+      console.log('🔍 Supabase URL:', import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL || '');
       console.log('🔍 Page size:', pageSize);
 
       // First, try direct Supabase query to check if RLS is blocking access
@@ -715,7 +715,7 @@ const EditEntry: React.FC = () => {
             // Also log helpful debugging info
             console.error('🌐 Network Error Details:', {
               error: directError.message,
-              supabaseUrl: import.meta.env.VITE_SUPABASE_URL || 'https://pmqeegdmcrktccszgbwu.supabase.co',
+              supabaseUrl: import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL || '',
               suggestion: 'Try: 1) Check internet 2) Clear browser cache 3) Check firewall',
             });
           }

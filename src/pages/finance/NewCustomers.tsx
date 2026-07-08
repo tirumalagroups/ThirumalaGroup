@@ -6,6 +6,7 @@ import { supabase } from '../../lib/supabase';
 import { Printer, User, Phone, MapPin } from 'lucide-react';
 import toast from 'react-hot-toast';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 
 interface NewCustItem {
   id: string;
@@ -25,9 +26,9 @@ const NewCustomers: React.FC = () => {
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     d.setMonth(d.getMonth() - 1); // 1 month ago
-    return d.toISOString().split('T')[0];
+    return getLocalBusinessDateISO(d);
   });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState(() => getLocalBusinessDateISO());
   const [searchQuery, setSearchQuery] = useState('');
   const [showPrintPreview, setShowPrintPreview] = useState(false);
 

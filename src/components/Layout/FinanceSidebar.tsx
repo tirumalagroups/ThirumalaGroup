@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { supabaseFinance } from '../../lib/supabaseFinance';
 import {
   Home,
   PlusCircle,
@@ -22,6 +23,7 @@ import {
   Shield,
   Settings,
   RefreshCw,
+  Phone,
 } from 'lucide-react';
 
 interface MenuItem {
@@ -39,6 +41,24 @@ interface MenuSection {
 
 const FinanceSidebar: React.FC = () => {
   const { user } = useAuth();
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    if (!user?.is_admin) return;
+
+    const fetchCount = async () => {
+      try {
+        const count = await supabaseFinance.getPendingApprovalsCount();
+        setPendingCount(count);
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    fetchCount();
+    const interval = setInterval(fetchCount, 10000);
+    return () => clearInterval(interval);
+  }, [user]);
 
   const sections: MenuSection[] = [
     {
@@ -58,7 +78,7 @@ const FinanceSidebar: React.FC = () => {
         { icon: Users, label: 'Customers', path: '/finance/customers', key: 'new_customers' },
         { icon: UserPlus, label: 'New Partner', path: '/finance/new-partner', key: 'partners' },
         { icon: Users, label: 'Partners', path: '/finance/partners', key: 'partners' },
-        { icon: BookOpen, label: 'Cash Book', path: '/finance/cash-book', key: 'daybook' },
+        { icon: BookOpen, label: 'Day Book Entry', path: '/finance/cash-book', key: 'daybook' },
         { icon: DollarSign, label: 'Capital Entry', path: '/finance/capital-entry', key: 'capital_entry' },
         { icon: Calculator, label: 'Calculator', path: '/finance/calculator', key: 'calculator' },
         { icon: Search, label: 'Search', path: '/finance/search', key: 'search' },
@@ -78,8 +98,10 @@ const FinanceSidebar: React.FC = () => {
       items: [
         { icon: BookOpen, label: 'Day Book', path: '/finance/daybook', key: 'daybook' },
         { icon: FileText, label: 'Daily Report', path: '/finance/daily-report', key: 'daily_report' },
+        { icon: Book, label: 'Detailed Ledger', path: '/finance/detailed-ledger', key: 'detailed_ledger' },
         { icon: BookOpen, label: 'General Ledger', path: '/finance/general-ledger', key: 'general_ledger' },
         { icon: AlertCircle, label: 'Dues List', path: '/finance/dues-ledger', key: 'dues_ledger' },
+        { icon: Phone, label: 'Payment Follow-up', path: '/finance/payment-followup', key: 'payment_followup' },
         { icon: TrendingUp, label: 'Profit & Loss', path: '/finance/pl', key: 'pl' },
         { icon: FileCheck, label: 'Final Statement', path: '/finance/final-statement', key: 'final_statement' },
         { icon: Briefcase, label: 'Business Details', path: '/finance/business-report', key: 'business_report' },
@@ -94,6 +116,13 @@ const FinanceSidebar: React.FC = () => {
           icon: Shield,
           label: 'User Access Management',
           path: '/finance/user-access-management',
+          key: 'user_access_management',
+          adminOnly: true,
+        },
+        {
+          icon: FileCheck,
+          label: 'Transaction Approval',
+          path: '/finance/transaction-approval',
           key: 'user_access_management',
           adminOnly: true,
         },
@@ -146,10 +175,17 @@ const FinanceSidebar: React.FC = () => {
                       }
                     >
                       {({ isActive }) => (
-                        <>
-                          <item.icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-slate-400'}`} />
-                          <span>{item.label}</span>
-                        </>
+                        <div className="flex items-center justify-between w-full">
+                          <div className="flex items-center gap-3">
+                            <item.icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-slate-400'}`} />
+                            <span>{item.label}</span>
+                          </div>
+                          {item.label === 'Transaction Approval' && pendingCount > 0 && (
+                            <span className="bg-red-500 text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded-full shadow-sm animate-pulse min-w-[18px] text-center leading-none">
+                              {pendingCount}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </NavLink>
                   </li>

@@ -30,8 +30,8 @@ export const getSharedPrintStyles = (options?: SharedPrintStyleOptions) => {
   return `
     body {
       font-family: Arial, sans-serif;
-      font-size: ${isLandscape ? '10pt' : '8pt'};
-      line-height: 1.3;
+      font-size: ${isLandscape ? '12pt' : '11pt'};
+      line-height: 1.4;
       margin: 0;
       padding: ${isLandscape ? '15px' : '8px'};
       background-color: #fff;
@@ -47,9 +47,9 @@ export const getSharedPrintStyles = (options?: SharedPrintStyleOptions) => {
     
     th, td {
       border: 1.5px solid #000;
-      padding: ${isLandscape ? '4px 3px' : '3px 2px'};
-      font-size: ${isLandscape ? '10pt' : '8pt'};
-      line-height: 1.15;
+      padding: ${isLandscape ? '5px 4px' : '4px 3px'};
+      font-size: ${isLandscape ? '12pt' : '11pt'};
+      line-height: 1.3;
       box-sizing: border-box;
       word-wrap: break-word;
       overflow: hidden;
@@ -162,7 +162,7 @@ export const getSharedPrintStyles = (options?: SharedPrintStyleOptions) => {
         margin: 0 !important;
         padding: 0 !important;
         background: white !important;
-        font-size: ${isLandscape ? '10pt' : '8pt'} !important;
+        font-size: ${isLandscape ? '12pt' : '11pt'} !important;
       }
       th {
         background-color: #f3f4f6 !important;

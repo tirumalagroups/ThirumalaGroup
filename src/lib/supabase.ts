@@ -1,12 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Supabase configuration with environment variables and fallbacks
+// Supabase configuration — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env
 const supabaseUrl =
-  import.meta.env.VITE_SUPABASE_URL ||
-  'https://pmqeegdmcrktccszgbwu.supabase.co';
+  import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey =
-  import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBtcWVlZ2RtY3JrdGNjc3pnYnd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5MDY1OTUsImV4cCI6MjA2NzQ4MjU5NX0.OqaYKbr2CcLd10JTdyy0IRawUPwW3KGCAbsPNThcCFM';
+  import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 // Validate configuration
 if (!supabaseUrl || !supabaseAnonKey) {

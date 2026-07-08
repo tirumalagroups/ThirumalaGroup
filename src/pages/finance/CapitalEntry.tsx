@@ -1,3 +1,4 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Card from '../../components/UI/Card';
@@ -32,7 +33,7 @@ const CapitalEntry: React.FC = () => {
 
   // Form States (New / Edit Entry)
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(() => getLocalBusinessDateISO());
   const [partnerId, setPartnerId] = useState('');
   const [particulars, setParticulars] = useState('');
   const [credit, setCredit] = useState('');
@@ -88,7 +89,7 @@ const CapitalEntry: React.FC = () => {
 
   const handleResetForm = () => {
     setEditingId(null);
-    setDate(new Date().toISOString().split('T')[0]);
+    setDate(getLocalBusinessDateISO());
     setPartnerId('');
     setParticulars('');
     setCredit('');

@@ -14,6 +14,7 @@ import {
 import toast from 'react-hot-toast';
 import { BiometricScanner } from '../../components/finance/BiometricScanner';
 import { validateFinanceForm, ValidationField } from '../../utils/financeValidation';
+import { compressToWebP } from '../../utils/imageCompressor';
 
 const NewCustomer: React.FC = () => {
   const navigate = useNavigate();
@@ -183,9 +184,16 @@ const NewCustomer: React.FC = () => {
     setUploading(true);
     try {
       const fileObj = dataURLtoFile(base64Data, `capture-${Date.now()}.jpg`);
+      const compressedBlob = await compressToWebP(fileObj, 1280, 0.78);
+      const filename = `capture-${Date.now()}.webp`;
+
       const { data, error } = await supabase.storage
         .from('finance-photos')
-        .upload(`photos/${fileObj.name}`, fileObj);
+        .upload(`photos/${filename}`, compressedBlob, {
+          contentType: 'image/webp',
+          cacheControl: '31536000',
+          upsert: true
+        });
 
       if (error) throw error;
 
@@ -208,6 +216,11 @@ const NewCustomer: React.FC = () => {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > 15 * 1024 * 1024) {
+        toast.error('File is too large. Max allowed size is 15MB.');
+        return;
+      }
+
       const reader = new FileReader();
       reader.onloadend = () => {
         setCapturedImage(reader.result as string);
@@ -216,9 +229,16 @@ const NewCustomer: React.FC = () => {
 
       setUploading(true);
       try {
+        const compressedBlob = await compressToWebP(file, 1280, 0.78);
+        const filename = `upload-${Date.now()}.webp`;
+
         const { data, error } = await supabase.storage
           .from('finance-photos')
-          .upload(`photos/upload-${Date.now()}-${file.name}`, file);
+          .upload(`photos/${filename}`, compressedBlob, {
+            contentType: 'image/webp',
+            cacheControl: '31536000',
+            upsert: true
+          });
 
         if (error) throw error;
 

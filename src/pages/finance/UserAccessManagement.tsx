@@ -23,7 +23,7 @@ const FINANCE_FEATURES_LIST = [
   { key: 'camera', label: 'Camera Attachment' },
   { key: 'daybook', label: 'Daybook Statement' },
   { key: 'general_ledger', label: 'General Ledger' },
-  { key: 'cd_ledger', label: 'CD (Chit Fund) Ledger' },
+  { key: 'cd_ledger', label: 'CD Ledger' },
   { key: 'stbd_ledger', label: 'STBD Ledger' },
   { key: 'hp_ledger', label: 'HP Ledger' },
   { key: 'tbd_ledger', label: 'TBD Ledger' },

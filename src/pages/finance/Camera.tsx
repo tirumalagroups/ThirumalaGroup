@@ -5,6 +5,7 @@ import { supabaseFinance, FinanceLoan, FinanceCustomer, FinancePhoto } from '../
 import { supabase } from '../../lib/supabase';
 import { Camera as CameraIcon, Trash2, Check, Video, AlertCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { compressToWebP } from '../../utils/imageCompressor';
 
 const Camera: React.FC = () => {
   const [loans, setLoans] = useState<(FinanceLoan & { customer: FinanceCustomer })[]>([]);
@@ -13,6 +14,7 @@ const Camera: React.FC = () => {
   const [existingPhotos, setExistingPhotos] = useState<FinancePhoto[]>([]);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,6 +101,18 @@ const Camera: React.FC = () => {
     }
   };
 
+  const dataURLtoFile = (dataurl: string, filename: string): File => {
+    const arr = dataurl.split(',');
+    const mime = arr[0].match(/:(.*?);/)![1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new File([u8arr], filename, { type: mime });
+  };
+
   const handleSavePhoto = async () => {
     if (!selectedLoanId) {
       toast.error('Please select a loan');
@@ -109,11 +123,32 @@ const Camera: React.FC = () => {
       return;
     }
 
+    setSaving(true);
     try {
+      const fileObj = dataURLtoFile(capturedImage, `camera-${Date.now()}.jpg`);
+      const compressedBlob = await compressToWebP(fileObj, 1280, 0.78);
+      const filename = `camera-${Date.now()}.webp`;
+
+      // Upload compressed WebP to Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('finance-photos')
+        .upload(`photos/${filename}`, compressedBlob, {
+          contentType: 'image/webp',
+          cacheControl: '31536000',
+          upsert: true
+        });
+
+      if (uploadError) throw uploadError;
+
+      const publicUrl = supabase.storage
+        .from('finance-photos')
+        .getPublicUrl(data.path).data.publicUrl;
+
+      // Link public URL in database
       const result = await supabaseFinance.addPhoto({
         loan_id: selectedLoanId,
         photo_type: photoType,
-        photo_url: capturedImage
+        photo_url: publicUrl
       });
 
       if (result) {
@@ -121,11 +156,13 @@ const Camera: React.FC = () => {
         setCapturedImage(null);
         fetchExistingPhotos();
       } else {
-        toast.error('Failed to save photo');
+        toast.error('Failed to link photo');
       }
     } catch (err) {
       console.error(err);
-      toast.error('Something went wrong');
+      toast.error('Failed to compress and upload photo');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -258,8 +295,9 @@ const Camera: React.FC = () => {
                   variant="success"
                   className="flex-1"
                   icon={Check}
+                  disabled={saving}
                 >
-                  Save Photo
+                  {saving ? 'Uploading...' : 'Save Photo'}
                 </Button>
               )}
             </div>

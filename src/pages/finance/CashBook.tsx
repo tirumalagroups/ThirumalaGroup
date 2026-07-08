@@ -13,12 +13,14 @@ import {
   Edit2, 
   Search, 
   Info,
+  Check,
   X
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { validateFinanceForm, ValidationField } from '../../utils/financeValidation';
 import { useAuth } from '../../contexts/AuthContext';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 
 const CashBook: React.FC = () => {
   const { user } = useAuth();
@@ -31,7 +33,7 @@ const CashBook: React.FC = () => {
 
   // Form States
   const [editId, setEditId] = useState<string | null>(null);
-  const [entryDate, setEntryDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [entryDate, setEntryDate] = useState(() => getLocalBusinessDateISO());
   const [accountNumber, setAccountNumber] = useState('');
   const [headOfAccount, setHeadOfAccount] = useState('');
   const [particulars, setParticulars] = useState('');
@@ -50,6 +52,7 @@ const CashBook: React.FC = () => {
 
   // Search & Sorting States
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PENDING' | 'APPROVED'>('ALL');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
 
   // Modal / Dialog Popups States
@@ -57,24 +60,25 @@ const CashBook: React.FC = () => {
   const [newAccountName, setNewAccountName] = useState('');
   const [newAccountNumber, setNewAccountNumber] = useState('');
   const [savingAccount, setSavingAccount] = useState(false);
-
-  // Print Preview Modal State
   const [showPrintModal, setShowPrintModal] = useState(false);
+
+  const [financeMode, setFinanceMode] = useState<'REGULAR' | 'ITR'>('REGULAR');
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [financeMode]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
+      const bookId = await supabaseFinance.getLegacyBookId(financeMode);
       const fetchedAccounts = await supabaseFinance.getCashbookAccounts();
-      const fetchedEntries = await supabaseFinance.getCashbookEntries();
+      const fetchedEntries = await supabaseFinance.getCashbookEntries(bookId);
       setAccounts(fetchedAccounts);
       setEntries(fetchedEntries);
     } catch (err) {
       console.error('Error fetching data:', err);
-      toast.error('Failed to load Cash Book data');
+      toast.error('Failed to load Day Book data');
     } finally {
       setLoading(false);
     }
@@ -109,7 +113,7 @@ const CashBook: React.FC = () => {
   // Form Reset / Clear
   const handleReset = (confirm = true) => {
     if (confirm && !window.confirm('Clear all form fields?')) return;
-    setEntryDate(new Date().toISOString().split('T')[0]);
+    setEntryDate(getLocalBusinessDateISO());
     setHeadOfAccount('');
     setAccountNumber('');
     setParticulars('');
@@ -135,7 +139,11 @@ const CashBook: React.FC = () => {
         label: 'Credit or Debit', 
         value: 'checked', 
         required: true, 
-        customValidation: () => (creditVal > 0 || debitVal > 0) ? null : 'Please enter either Credit or Debit amount greater than 0'
+        customValidation: () => (creditVal > 0 && debitVal > 0) 
+          ? 'Cannot enter both Credit and Debit' 
+          : (creditVal > 0 || debitVal > 0) 
+            ? null 
+            : 'Please enter either Credit or Debit amount greater than 0'
       }
     ];
 
@@ -147,32 +155,38 @@ const CashBook: React.FC = () => {
     const staffName = user?.username || 'Staff';
     const selectedAccName = accounts.find(a => a.id === headOfAccount)?.account_name || headOfAccount;
 
-    const payload = {
-      entry_date: entryDate,
-      account_number: accountNumber.trim() || null,
-      head_of_account: selectedAccName,
-      particulars: particulars.trim(),
-      credit: creditVal,
-      debit: debitVal,
-      created_by: staffName
-    };
-
     try {
+      const regBookId = await supabaseFinance.getLegacyBookId('REGULAR');
+      const itrBookId = await supabaseFinance.getLegacyBookId('ITR');
+      const bookId = financeMode === 'ITR' ? itrBookId : regBookId;
+
+      const payload = {
+        entry_date: entryDate,
+        account_number: accountNumber.trim() || null,
+        head_of_account: selectedAccName,
+        particulars: particulars.trim(),
+        credit: creditVal,
+        debit: debitVal,
+        created_by: staffName,
+        status: 'PENDING',
+        book_id: bookId
+      };
+
       let result;
       if (editId) {
         result = await supabaseFinance.updateCashbookEntry(editId, payload, staffName);
       } else {
-        result = await supabaseFinance.createCashbookEntry(payload);
+        result = await supabaseFinance.createCashbookEntry(payload, true);
       }
 
       if (result) {
         toast.success(editId ? 'Entry updated successfully' : 'Entry saved successfully');
         handleReset(false);
         // Refresh data
-        const fetchedEntries = await supabaseFinance.getCashbookEntries();
+        const fetchedEntries = await supabaseFinance.getCashbookEntries(bookId);
         setEntries(fetchedEntries);
       } else {
-        toast.error('Failed to save cash book entry');
+        toast.error('Failed to save Day Book entry');
       }
     } catch (err) {
       console.error(err);
@@ -185,11 +199,12 @@ const CashBook: React.FC = () => {
   // Edit action
   const handleEditClick = (entry: FinanceCashbookEntry) => {
     setEditId(entry.id);
-    setEntryDate(entry.entry_date);
+    setEntryDate(entry.entry_date.split('T')[0]);
     setAccountNumber(entry.account_number || '');
     setParticulars(entry.particulars);
     setCredit(entry.credit > 0 ? String(entry.credit) : '');
     setDebit(entry.debit > 0 ? String(entry.debit) : '');
+    setErrors({});
 
     // Resolve head of account name back to ID if possible
     const match = accounts.find(a => a.account_name === entry.head_of_account);
@@ -198,6 +213,8 @@ const CashBook: React.FC = () => {
     } else {
       setHeadOfAccount(entry.head_of_account);
     }
+
+    if (particularsRef.current) particularsRef.current.focus();
     
     // Smooth scroll to form on mobile
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -205,53 +222,68 @@ const CashBook: React.FC = () => {
 
   // Delete Action
   const handleDeleteClick = async (id: string) => {
-    if (!window.confirm('Are you sure you want to delete this cash book entry?')) return;
-    const staffName = user?.username || 'Staff';
+    if (!window.confirm('Are you sure you want to delete this Day Book entry?')) return;
+
     try {
-      const success = await supabaseFinance.deleteCashbookEntry(id, staffName);
-      if (success) {
-        toast.success('Entry deleted');
-        const fetchedEntries = await supabaseFinance.getCashbookEntries();
-        setEntries(fetchedEntries);
+      const staffName = user?.username || 'Staff';
+      await supabaseFinance.deleteCashbookEntry(id, staffName);
+      toast.success('Entry deleted successfully');
+      await fetchData();
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to delete entry');
+    }
+  };
+
+  // Approve Action
+  const handleApproveClick = async (id: string) => {
+    if (!window.confirm('Are you sure you want to approve this Day Book Entry?')) return;
+
+    try {
+      const staffName = user?.username || 'Staff';
+      const result = await supabaseFinance.approveCashbookEntry(id, staffName);
+      if (result) {
+        toast.success('Day Book Entry approved successfully');
+        await fetchData();
       } else {
-        toast.error('Failed to delete entry');
+        toast.error('Failed to approve entry');
       }
     } catch (err) {
       console.error(err);
-      toast.error('Error occurred while deleting');
+      toast.error('Error approving entry');
     }
   };
 
   // Delete All Action (authorized check)
   const handleDeleteAll = async () => {
     if (!user?.is_admin) {
-      toast.error('Access Denied: Only authorized administrators can clear the Cash Book');
+      toast.error('Access Denied: Only authorized administrators can clear the Day Book');
       return;
     }
 
-    if (!window.confirm('⚠️ WARNING: This will permanently DELETE ALL entries from the Cash Book. This action is irreversible. Are you sure you want to proceed?')) {
+    if (!window.confirm('⚠️ WARNING: This will permanently DELETE ALL entries from the Day Book. This action is irreversible. Are you sure you want to proceed?')) {
       return;
     }
     
-    const doubleCheck = window.prompt('To confirm deletion, type "DELETE ALL" in the box below:');
+    const doubleCheck = window.prompt('Type "DELETE ALL" to confirm clearing the ledger:');
     if (doubleCheck !== 'DELETE ALL') {
-      toast.error('Confirmation mismatch. Operation cancelled.');
+      toast.error('Confirmation mismatch. Clearing aborted.');
       return;
     }
 
-    const deleteToastId = toast.loading('Clearing all cash book entries...');
-    const staffName = user?.username || 'Staff';
+    const deleteToastId = toast.loading('Clearing all Day Book entries...');
     try {
-      const success = await supabaseFinance.deleteAllCashbookEntries(staffName);
+      const staffName = user?.username || 'Admin';
+      const success = await supabaseFinance.clearCashbook(staffName);
       if (success) {
-        toast.success('All cash book entries deleted successfully', { id: deleteToastId });
-        fetchData();
+        toast.success('All Day Book entries deleted successfully', { id: deleteToastId });
+        await fetchData();
       } else {
-        toast.error('Failed to delete entries', { id: deleteToastId });
+        toast.error('Failed to clear Day Book', { id: deleteToastId });
       }
     } catch (err) {
       console.error(err);
-      toast.error('Error occurred while clearing Cash Book', { id: deleteToastId });
+      toast.error('Error occurred while clearing Day Book', { id: deleteToastId });
     }
   };
 
@@ -329,6 +361,11 @@ const CashBook: React.FC = () => {
       });
     }
 
+    // Filter status
+    if (statusFilter !== 'ALL') {
+      result = result.filter(e => (e.status || 'PENDING') === statusFilter);
+    }
+
     // Sort order
     result.sort((a, b) => {
       const timeA = new Date(a.entry_date).getTime();
@@ -340,7 +377,7 @@ const CashBook: React.FC = () => {
     });
 
     return result;
-  }, [entries, searchQuery, sortOrder]);
+  }, [entries, searchQuery, statusFilter, sortOrder]);
 
   // Summaries calculation (based on filtered list)
   const summaries = useMemo(() => {
@@ -370,10 +407,27 @@ const CashBook: React.FC = () => {
           <div className="text-slate-400 flex items-center gap-1.5 finance-small-label uppercase">
             <span>DASHBOARD</span>
             <span>/</span>
-            <span className="text-slate-600">CASH BOOK</span>
+            <span className="text-slate-600">DAY BOOK ENTRY</span>
           </div>
-          <h1 className="mt-1 finance-h1">CASH BOOK</h1>
-          <p className="mt-0.5 finance-small-label uppercase">
+          <h1 className="mt-1 finance-h1">DAY BOOK ENTRY</h1>
+          {/* Mode Selector Tabs */}
+          <div className="flex gap-2 mt-3">
+            {(['REGULAR', 'ITR'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setFinanceMode(mode)}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold uppercase transition-all shadow-sm ${
+                  financeMode === mode
+                    ? 'bg-[#0f172a] text-white'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                {mode} Mode
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 finance-small-label uppercase">
             DAY-BOOK ENTRIES · CREDIT / DEBIT POSTED TO GENERAL LEDGER
           </p>
         </div>
@@ -592,23 +646,34 @@ const CashBook: React.FC = () => {
           >
             <div className="space-y-4">
               
-              {/* Search Filter Box */}
-              <div className="relative">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Filter by head, particulars, date, account..."
-                  className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-slate-850 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-950 shadow-sm finance-header-time"
-                />
+              {/* Search & Status Filter Box */}
+              <div className="flex gap-4">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Filter by head, particulars, date, account..."
+                    className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-slate-850 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-950 shadow-sm finance-header-time"
+                  />
+                </div>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-slate-700 focus:outline-none focus:ring-1 focus:ring-slate-950 shadow-sm finance-header-time"
+                >
+                  <option value="ALL">ALL STATUSES</option>
+                  <option value="PENDING">PENDING APPROVAL</option>
+                  <option value="APPROVED">APPROVED</option>
+                </select>
               </div>
 
               {/* Entries Table */}
               {loading ? (
                 <div className="flex flex-col items-center justify-center py-16 space-y-3">
                   <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-slate-900"></div>
-                  <span className="text-slate-400 finance-header-time uppercase">Loading cash book entries...</span>
+                  <span className="text-slate-400 finance-header-time uppercase">Loading Day Book entries...</span>
                 </div>
               ) : filteredEntries.length === 0 ? (
                 <div className="text-center py-16 border border-dashed border-slate-200 rounded-xl space-y-4 bg-slate-50/50">
@@ -634,6 +699,7 @@ const CashBook: React.FC = () => {
                         <th className="text-right finance-small-label uppercase">Credit</th>
                         <th className="text-right finance-small-label uppercase">Debit</th>
                         <th className="finance-small-label uppercase">By</th>
+                        <th className="finance-small-label uppercase text-center">Status</th>
                         <th className="text-right finance-small-label uppercase">Actions</th>
                       </tr>
                     </thead>
@@ -661,8 +727,26 @@ const CashBook: React.FC = () => {
                           <td className="px-3 py-3 text-slate-500 finance-input uppercase">
                             {e.created_by || 'Staff'}
                           </td>
+                          <td className="px-3 py-3 text-center whitespace-nowrap">
+                            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider ${
+                              (e.status || 'PENDING') === 'APPROVED' 
+                                ? 'bg-green-100 text-green-800 border border-green-200' 
+                                : 'bg-amber-100 text-amber-800 border border-amber-200'
+                            }`}>
+                              {e.status || 'PENDING'}
+                            </span>
+                          </td>
                           <td className="px-3 py-3 text-right whitespace-nowrap">
                             <div className="flex justify-end gap-1">
+                              {user?.is_admin && (e.status || 'PENDING') !== 'APPROVED' && (
+                                <button
+                                  onClick={() => handleApproveClick(e.id)}
+                                  title="Approve Entry"
+                                  className="p-1 text-green-700 bg-green-50 hover:bg-green-100 rounded border border-green-200"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleEditClick(e)}
                                 title="Edit Entry"

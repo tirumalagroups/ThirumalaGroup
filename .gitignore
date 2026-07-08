@@ -131,3 +131,10 @@ fix_lint.js
 
 # Migration files not intended for repository
 supabase/mumbai_migration_schema.sql
+
+# Legacy database/software files
+old software/
+# CD forensic / repair one-off scripts
+scripts/cd120_*.json
+scripts/inspect_cd*.mjs
+scripts/repair_cd*.mjs

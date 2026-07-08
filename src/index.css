@@ -46,7 +46,7 @@
     @apply text-[12px] font-extrabold text-slate-800 leading-[1.33] tracking-[0.3px];
   }
   .finance-small-label {
-    @apply text-[10px] font-extrabold text-slate-800 leading-[1.50] tracking-[0.5px] uppercase;
+    @apply text-[13px] font-bold text-slate-800 leading-snug uppercase;
   }
   .finance-header-time {
     @apply text-[12px] font-extrabold text-slate-900 leading-[1.33] tracking-[0.16px];

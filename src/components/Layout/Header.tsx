@@ -13,7 +13,7 @@ const Header: React.FC = () => {
   const { user } = useAuth();
   const { isFinanceMode, isITRMode } = useTableMode();
   const { currentBook, books, selectBook, createBook } = useBook();
-  const { isOnline, isSyncing, pendingCount, lastSyncAt, offlineSince } = useOffline();
+  const { connectionStatus, isSyncing, pendingCount, lastSyncAt, offlineSince } = useOffline();
   
   const [isOpen, setIsOpen] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -206,7 +206,11 @@ const Header: React.FC = () => {
                 <span className="flex items-center gap-1.5 text-blue-700 font-bold">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" /> Syncing
                 </span>
-              ) : isOnline ? (
+              ) : connectionStatus === 'CHECKING' ? (
+                <span className="flex items-center gap-1.5 text-blue-700 font-bold">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" /> Checking
+                </span>
+              ) : connectionStatus === 'ONLINE' ? (
                 <div className="flex flex-col text-left">
                   <span className="flex items-center gap-1.5 text-green-700 font-bold leading-tight">
                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse inline-block" /> Online
@@ -216,6 +220,15 @@ const Header: React.FC = () => {
                       Last Sync: {format(parseISO(lastSyncAt), 'hh:mm a')}
                     </span>
                   )}
+                </div>
+              ) : connectionStatus === 'BACKEND_ERROR' ? (
+                <div className="flex flex-col text-left">
+                  <span className="flex items-center gap-1.5 text-amber-700 font-bold leading-tight">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> Server Error
+                  </span>
+                  <span className="text-[9px] text-amber-600 font-normal leading-none mt-0.5">
+                    API Limited
+                  </span>
                 </div>
               ) : (
                 <div className="flex flex-col text-left">

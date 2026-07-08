@@ -1,193 +1,169 @@
+import { getLocalBusinessDateISO } from '../../utils/dateUtils';
 import React, { useEffect, useState, useMemo } from 'react';
 import Button from '../../components/UI/Button';
-import { supabaseFinance } from '../../lib/supabaseFinance';
-import { Printer, RefreshCw, ArrowLeft } from 'lucide-react';
+import Card from '../../components/UI/Card';
+import Input from '../../components/UI/Input';
+import { supabaseFinance, UnifiedLedgerEntry } from '../../lib/supabaseFinance';
+import { Printer, RefreshCw, ArrowLeft, ChevronRight, X, Calendar, Search } from 'lucide-react';
 import toast from 'react-hot-toast';
 import FinancePrintPreview from '../../components/finance/FinancePrintPreview';
 import { useNavigate } from 'react-router-dom';
-
-interface LedgerEntry {
-  id: string;
-  date: string;
-  time: string;
-  accountType: string;
-  accountName: string;
-  particulars: string;
-  credit: number;
-  debit: number;
-  voucherNo: string;
-  user: string;
-}
 
 const GeneralLedger: React.FC = () => {
   const navigate = useNavigate();
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
-    d.setDate(1);
+    d.setDate(1); // Default to start of month
     return d.toISOString().split('T')[0];
   });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
-  
+  const [endDate, setEndDate] = useState(() => getLocalBusinessDateISO());
   const [loading, setLoading] = useState(true);
-  const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
-  const [cashbookAccounts, setCashbookAccounts] = useState<string[]>([]);
-  
-  const [selectedAccountType, setSelectedAccountType] = useState<string | null>(null);
-  const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
-  
+  const [allEntries, setAllEntries] = useState<UnifiedLedgerEntry[]>([]);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const [selectedHead, setSelectedHead] = useState<string | null>(null);
+  const [drillSearchQuery, setDrillSearchQuery] = useState('');
 
-  const accountTypes = ['Loan Operations', 'Partner Capital', 'Cashbook'];
+  const canonicalHeads = [
+    'BANK',
+    'CAPITAL',
+    'CD INTEREST',
+    'CD PRINCIPAL',
+    'HP COMMISSION',
+    'STBD COMMISSION',
+    'TBD COMMISSION',
+    'LIABILITIES',
+    'SALARY',
+    'EXPENDITURE'
+  ];
 
   useEffect(() => {
     fetchLedgerData();
-  }, []);
+  }, [startDate, endDate]);
 
   const fetchLedgerData = async () => {
     setLoading(true);
     try {
-      const [txs, capitals, cbEntries, cbAccounts] = await Promise.all([
-        supabaseFinance.getTransactions(),
-        supabaseFinance.getCapitalEntries(),
-        supabaseFinance.getCashbookEntries(),
-        supabaseFinance.getCashbookAccounts()
-      ]);
-
-      const entries: LedgerEntry[] = [];
-
-      // 1. Loans
-      txs.forEach(tx => {
-        const isCol = tx.type === 'Collection';
-        const amt = Number(tx.amount) || 0;
-        entries.push({
-          id: tx.id,
-          date: tx.date,
-          time: tx.created_at,
-          accountType: 'Loan Operations',
-          accountName: isCol ? 'Loan Collections' : 'Loan Disbursements',
-          particulars: `${tx.loan?.customer?.name || 'Customer'} (${tx.loan?.loan_id || 'N/A'}) - ${tx.remarks || 'No remarks'}`,
-          credit: isCol ? amt : 0,
-          debit: !isCol ? amt : 0,
-          voucherNo: tx.id.slice(0, 8).toUpperCase(),
-          user: (tx as any).staff_name || 'Admin'
-        });
+      const data = await supabaseFinance.getUnifiedLedgerEntries({
+        startDate,
+        endDate
       });
-
-      // 2. Capital
-      capitals.forEach(cap => {
-        const cred = Number(cap.credit) || 0;
-        const deb = Number(cap.debit) || 0;
-        entries.push({
-          id: cap.id,
-          date: cap.entry_date,
-          time: cap.created_at,
-          accountType: 'Partner Capital',
-          accountName: cred > 0 ? 'Capital Deposits' : 'Capital Withdrawals',
-          particulars: `${cap.partner?.name || cap.partner_name || 'Partner'} - ${cap.particulars || 'No remarks'}`,
-          credit: cred,
-          debit: deb,
-          voucherNo: cap.id.slice(0, 8).toUpperCase(),
-          user: cap.created_by || 'Admin'
-        });
-      });
-
-      // 3. Cashbook
-      const cbAccMap = new Map(cbAccounts.map(a => [a.id, a.account_name]));
-      setCashbookAccounts(cbAccounts.map(a => a.account_name));
-
-      cbEntries.forEach(cb => {
-        entries.push({
-          id: cb.id,
-          date: cb.entry_date,
-          time: cb.created_at,
-          accountType: 'Cashbook',
-          accountName: cbAccMap.get(cb.head_of_account) || 'General Cashbook',
-          particulars: cb.particulars || '-',
-          credit: Number(cb.credit) || 0,
-          debit: Number(cb.debit) || 0,
-          voucherNo: cb.id.slice(0, 8).toUpperCase(),
-          user: cb.created_by || 'Admin'
-        });
-      });
-
-      setAllEntries(entries);
+      setAllEntries(data);
     } catch (err) {
       console.error(err);
-      toast.error('Failed to load ledger data');
+      toast.error('Failed to load general ledger data');
     } finally {
       setLoading(false);
     }
   };
 
-  const accountsForSelectedType = useMemo(() => {
-    if (!selectedAccountType) return [];
-    if (selectedAccountType === 'Loan Operations') return ['Loan Collections', 'Loan Disbursements'];
-    if (selectedAccountType === 'Partner Capital') return ['Capital Deposits', 'Capital Withdrawals'];
-    if (selectedAccountType === 'Cashbook') return cashbookAccounts;
-    return [];
-  }, [selectedAccountType, cashbookAccounts]);
-
-  const { displayedTransactions, openingBalance, totalCredits, totalDebits, closingBalance } = useMemo(() => {
-    if (!selectedAccount || !startDate || !endDate) {
-      return { displayedTransactions: [], openingBalance: 0, totalCredits: 0, totalDebits: 0, closingBalance: 0 };
+  const mapToGeneralLedgerHead = (entry: UnifiedLedgerEntry): string => {
+    const head = (entry.head_of_account || '').toUpperCase();
+    if (head === 'BANK' || head.includes('BANK')) return 'BANK';
+    if (head === 'CAPITAL' || head.includes('CAPITAL')) return 'CAPITAL';
+    
+    if (entry.category === 'CD') {
+      if (head.includes('PRINCIPAL') || head === 'CD PRINCIPAL' || head === 'CD A/C') return 'CD PRINCIPAL';
+      return 'CD INTEREST';
     }
+    if (entry.category === 'HP') {
+      if (head.includes('COMMISSION') || head.includes('PENALTY') || head.includes('INTEREST')) return 'HP COMMISSION';
+      return 'LIABILITIES';
+    }
+    if (entry.category === 'STBD') {
+      if (head.includes('COMMISSION') || head.includes('PENALTY') || head.includes('INTEREST')) return 'STBD COMMISSION';
+      return 'LIABILITIES';
+    }
+    if (entry.category === 'TBD') {
+      if (head.includes('COMMISSION') || head.includes('PENALTY') || head.includes('INTEREST')) return 'TBD COMMISSION';
+      return 'LIABILITIES';
+    }
+    if (head === 'SALARY' || head.includes('SALARY')) return 'SALARY';
+    if (head === 'EXPENSE' || head === 'EXPENDITURE' || head.includes('EXPENSE') || head.includes('EXPENDITURE')) return 'EXPENDITURE';
+    if (head === 'LIABILITIES' || head.includes('LIABILITY')) return 'LIABILITIES';
+    return 'LIABILITIES';
+  };
 
-    let opBal = 0;
-    let periodCred = 0;
-    let periodDeb = 0;
-    const currentTxs: (LedgerEntry & { runningBalance: number })[] = [];
+  const summaryData = useMemo(() => {
+    // Initialize summary map for canonical heads
+    const map: Record<string, { debit: number; credit: number }> = {};
+    canonicalHeads.forEach(head => {
+      map[head] = { debit: 0, credit: 0 };
+    });
 
-    // Filter to selected account
-    const accountEntries = allEntries.filter(e => e.accountName === selectedAccount);
-
-    // Calculate opening balance
-    accountEntries.forEach(e => {
-      if (e.date < startDate) {
-        opBal += e.credit;
-        opBal -= e.debit;
+    // Aggregate values
+    allEntries.forEach(entry => {
+      const head = mapToGeneralLedgerHead(entry);
+      if (!map[head]) {
+        map[head] = { debit: 0, credit: 0 };
       }
+      map[head].debit += entry.debit || 0;
+      map[head].credit += entry.credit || 0;
     });
 
-    // Get period entries
-    const periodEntries = accountEntries.filter(e => e.date >= startDate && e.date <= endDate);
-    periodEntries.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
-
-    let runBal = opBal;
-    periodEntries.forEach(e => {
-      periodCred += e.credit;
-      periodDeb += e.debit;
-      runBal += e.credit;
-      runBal -= e.debit;
-      currentTxs.push({ ...e, runningBalance: runBal });
+    return Object.entries(map).map(([head, totals]) => {
+      // Balance = Credit - Debit
+      const balance = totals.credit - totals.debit;
+      return {
+        head,
+        debit: totals.debit,
+        credit: totals.credit,
+        balance
+      };
     });
+  }, [allEntries]);
 
+  // Totals for the entire general ledger
+  const overallTotals = useMemo(() => {
+    let debit = 0;
+    let credit = 0;
+    summaryData.forEach(s => {
+      debit += s.debit;
+      credit += s.credit;
+    });
     return {
-      displayedTransactions: currentTxs,
-      openingBalance: opBal,
-      totalCredits: periodCred,
-      totalDebits: periodDeb,
-      closingBalance: runBal
+      debit,
+      credit,
+      balance: credit - debit
     };
-  }, [allEntries, selectedAccount, startDate, endDate]);
+  }, [summaryData]);
 
-  const handleAccountTypeClick = (type: string) => {
-    setSelectedAccountType(type);
-    setSelectedAccount(null); // Reset child selection
-  };
+  // Drilldown entries
+  const drillDownEntries = useMemo(() => {
+    if (!selectedHead) return [];
+    let list = allEntries.filter(entry => mapToGeneralLedgerHead(entry) === selectedHead);
 
-  const handleAccountClick = (acc: string) => {
-    setSelectedAccount(acc);
-  };
+    if (drillSearchQuery.trim()) {
+      const q = drillSearchQuery.toLowerCase().trim();
+      list = list.filter(entry => 
+        (entry.account_number || '').toLowerCase().includes(q) ||
+        (entry.particulars || '').toLowerCase().includes(q) ||
+        (entry.user || '').toLowerCase().includes(q) ||
+        String(entry.debit).includes(q) ||
+        String(entry.credit).includes(q)
+      );
+    }
+    return list;
+  }, [allEntries, selectedHead, drillSearchQuery]);
 
-  const displayDateRange = `${new Date(startDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).toUpperCase().replace(/ /g, '-')} TO ${new Date(endDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).toUpperCase().replace(/ /g, '-')}`;
+  const drillDownTotals = useMemo(() => {
+    let debit = 0;
+    let credit = 0;
+    drillDownEntries.forEach(e => {
+      debit += e.debit || 0;
+      credit += e.credit || 0;
+    });
+    return { debit, credit, balance: credit - debit };
+  }, [drillDownEntries]);
+
+  const displayDateRange = `${new Date(startDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase().replace(/ /g, '-')} TO ${new Date(endDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase().replace(/ /g, '-')}`;
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto print:hidden">
+    <div className="space-y-6 max-w-7xl mx-auto p-6 print:p-0">
       {/* Header */}
-      <div className="flex justify-between items-center bg-white p-4 md:p-6 rounded-xl border border-slate-200 shadow-sm">
+      <div className={`flex justify-between items-center bg-white p-4 md:p-6 rounded-xl border border-slate-200 shadow-sm ${showPrintPreview ? 'print:hidden' : ''}`}>
         <div>
           <h1 className="finance-h1">General Ledger</h1>
-          <p className="finance-small-label uppercase">Drill from Account Types &rarr; Accounts &rarr; Transaction Detail</p>
+          <p className="finance-small-label uppercase">Summary of accounts with absolute drill-down capabilities</p>
         </div>
         <div className="flex gap-2">
           <Button onClick={() => navigate(-1)} variant="secondary" size="sm" icon={ArrowLeft} className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 finance-header-time uppercase">
@@ -197,275 +173,254 @@ const GeneralLedger: React.FC = () => {
             Refresh
           </Button>
           <Button onClick={() => setShowPrintPreview(true)} variant="primary" size="sm" icon={Printer} className="bg-[#0b1329] hover:bg-slate-800 text-white finance-header-time uppercase">
-            Print
+            Print Summary
           </Button>
         </div>
       </div>
 
-      {/* Top Filter Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-center">
-          <label className="text-slate-400 mb-1 finance-small-label uppercase">From</label>
-          <input
-            type="date"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-            className="w-full text-slate-900 bg-transparent border-none p-0 focus:ring-0 cursor-pointer finance-sidebar-link"
-          />
-        </div>
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-center">
-          <label className="text-slate-400 mb-1 finance-small-label uppercase">To</label>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            className="w-full text-slate-900 bg-transparent border-none p-0 focus:ring-0 cursor-pointer finance-sidebar-link"
-          />
-        </div>
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-slate-400 block finance-small-label uppercase">Credits</span>
-          <span className="text-emerald-600 finance-money">₹{totalCredits.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-        </div>
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <span className="text-slate-400 block finance-small-label uppercase">Debits</span>
-          <span className="text-red-600 finance-money">₹{totalDebits.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-        </div>
+      {/* Date Filters */}
+      <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-slate-50 border border-slate-200 rounded-xl ${showPrintPreview ? 'print:hidden' : ''}`}>
+        <Input
+          label="FROM DATE"
+          type="date"
+          value={startDate}
+          onChange={setStartDate}
+          icon={Calendar}
+        />
+        <Input
+          label="TO DATE"
+          type="date"
+          value={endDate}
+          onChange={setEndDate}
+          icon={Calendar}
+        />
       </div>
 
-      {/* Middle Row: Account Types & Accounts */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        
-        {/* Account Types */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-          <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-            <div>
-              <h3 className="text-slate-900 finance-sidebar-link uppercase">Account Types</h3>
-              <p className="text-slate-500 mt-0.5 finance-small-label uppercase">{accountTypes.length} GROUPS</p>
+      {/* Summary Table */}
+      <div className={showPrintPreview ? 'print:hidden' : ''}>
+        <Card
+          title={
+            <div className="flex justify-between items-center w-full">
+              <span className="finance-card-title uppercase">Accounts Summary</span>
+              <span className="font-mono text-slate-500 text-right finance-small-label uppercase">
+                {displayDateRange}
+              </span>
             </div>
-            <span className="bg-[#e0f2fe] text-[#0369a1] px-2 py-0.5 rounded border border-[#bae6fd] finance-small-label uppercase">LIVE</span>
-          </div>
-          <div className="p-2 flex-1">
-            {accountTypes.length === 0 ? (
-              <div className="h-full flex items-center justify-center border border-dashed border-slate-200 rounded-lg p-8">
-                <span className="text-slate-400 finance-header-time uppercase">No Account Types</span>
+          }
+          subtitle="Click any row to drill down into transaction details"
+          className="shadow-md border-slate-150 rounded-xl overflow-hidden"
+        >
+          {loading ? (
+            <div className="flex justify-center py-16">
+              <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-[#0b1329]"></div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="overflow-x-auto border border-slate-150 rounded-xl">
+                <table className="min-w-full divide-y divide-slate-150 finance-caption">
+                  <thead>
+                    <tr className="bg-slate-50">
+                      <th className="finance-small-label uppercase">Head of Account</th>
+                      <th className="text-right finance-small-label uppercase">Debit (Dr)</th>
+                      <th className="text-right finance-small-label uppercase">Credit (Cr)</th>
+                      <th className="text-right finance-small-label uppercase">Balance</th>
+                      <th className="text-center finance-small-label uppercase w-20">Drill</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-100">
+                    {summaryData.map(s => (
+                      <tr 
+                        key={s.head} 
+                        onClick={() => setSelectedHead(s.head)}
+                        className="hover:bg-slate-50/50 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-3.5 text-slate-900 font-bold uppercase finance-input">{s.head}</td>
+                        <td className="px-4 py-3.5 text-right text-rose-600 font-semibold whitespace-nowrap">
+                          {s.debit > 0 ? `₹${s.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                        </td>
+                        <td className="px-4 py-3.5 text-right text-emerald-600 font-semibold whitespace-nowrap">
+                          {s.credit > 0 ? `₹${s.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                        </td>
+                        <td className={`px-4 py-3.5 text-right font-black whitespace-nowrap ${s.balance >= 0 ? 'text-emerald-800' : 'text-rose-850'}`}>
+                          ₹{Math.abs(s.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })} {s.balance >= 0 ? 'Cr' : 'Dr'}
+                        </td>
+                        <td className="px-4 py-3.5 text-center text-slate-400">
+                          <ChevronRight className="w-4 h-4 mx-auto" />
+                        </td>
+                      </tr>
+                    ))}
+                    {/* Overall totals */}
+                    <tr className="bg-slate-50 font-black border-t-2 border-slate-200">
+                      <td className="px-4 py-4 text-slate-800 uppercase finance-input">Grand Total:</td>
+                      <td className="px-4 py-4 text-right text-rose-700 font-extrabold whitespace-nowrap">
+                        ₹{overallTotals.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </td>
+                      <td className="px-4 py-4 text-right text-emerald-700 font-extrabold whitespace-nowrap">
+                        ₹{overallTotals.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </td>
+                      <td className={`px-4 py-4 text-right font-black whitespace-nowrap ${overallTotals.balance >= 0 ? 'text-emerald-900' : 'text-rose-900'}`}>
+                        ₹{Math.abs(overallTotals.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })} {overallTotals.balance >= 0 ? 'Cr' : 'Dr'}
+                      </td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            ) : (
-              <div className="space-y-1">
-                {accountTypes.map(type => (
-                  <button
-                    key={type}
-                    onClick={() => handleAccountTypeClick(type)}
-                    className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${ selectedAccountType === type ? 'bg-[#0b1329] text-white border-[#0b1329] shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50' } finance-sidebar-link`}
-                  >
-                    {type}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Accounts */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[300px] md:h-auto">
-          <div className="p-4 border-b border-slate-100 bg-slate-50">
-            <h3 className="text-slate-900 finance-sidebar-link uppercase">Accounts</h3>
-            <p className="text-slate-500 mt-0.5 finance-small-label uppercase">Select an account type</p>
-          </div>
-          <div className="p-2 flex-1 overflow-y-auto">
-            {!selectedAccountType ? (
-              <div className="h-full flex items-center justify-center border border-dashed border-slate-200 rounded-lg p-8 mx-2 mt-2 mb-2">
-                <span className="text-slate-400 finance-header-time uppercase">Pick an account type</span>
-              </div>
-            ) : accountsForSelectedType.length === 0 ? (
-              <div className="h-full flex items-center justify-center border border-dashed border-slate-200 rounded-lg p-8 mx-2 mt-2 mb-2">
-                <span className="text-slate-400 finance-header-time uppercase">No accounts found</span>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {accountsForSelectedType.map(acc => (
-                  <button
-                    key={acc}
-                    onClick={() => handleAccountClick(acc)}
-                    className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${ selectedAccount === acc ? 'bg-[#0b1329] text-white border-[#0b1329] shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50' } finance-sidebar-link`}
-                  >
-                    {acc}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
+            </div>
+          )}
+        </Card>
       </div>
 
-      {/* Bottom Row: Transaction Details */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-          <div>
-            <h3 className="text-slate-900 finance-sidebar-link uppercase">Transaction Details</h3>
-            <p className="text-slate-500 mt-0.5 finance-small-label uppercase">
-              {selectedAccount ? `${selectedAccount} · ${displayDateRange}` : 'Select an account'}
-            </p>
+      {/* Drill Down Modal */}
+      {selectedHead && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-5xl w-full h-[85vh] flex flex-col overflow-hidden">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 uppercase">
+                  Drill Down: {selectedHead}
+                </h3>
+                <p className="text-xs text-slate-500 font-semibold uppercase mt-0.5">{displayDateRange}</p>
+              </div>
+              <button 
+                onClick={() => { setSelectedHead(null); setDrillSearchQuery(''); }}
+                className="text-slate-400 hover:text-slate-600 transition-colors p-1.5 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 flex-1 flex flex-col space-y-4 overflow-y-auto">
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <Input 
+                    label="Search Drill Down Entries" 
+                    value={drillSearchQuery} 
+                    onChange={setDrillSearchQuery}
+                    placeholder="Search by account number, amount, particulars..." 
+                    icon={Search}
+                  />
+                </div>
+                <div className="flex gap-4 items-end pb-1.5 text-center text-xs">
+                  <div className="px-4 py-2 bg-red-50 border border-red-100 rounded-lg">
+                    <span className="text-red-600 block uppercase font-bold text-[9px]">Drill Debit</span>
+                    <span className="font-bold text-red-800">₹{drillDownTotals.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="px-4 py-2 bg-green-50 border border-green-100 rounded-lg">
+                    <span className="text-green-600 block uppercase font-bold text-[9px]">Drill Credit</span>
+                    <span className="font-bold text-green-800">₹{drillDownTotals.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className={`px-4 py-2 border rounded-lg ${drillDownTotals.balance >= 0 ? 'bg-emerald-50 border-emerald-100 text-emerald-800' : 'bg-rose-50 border-rose-100 text-rose-800'}`}>
+                    <span className="block uppercase font-bold text-[9px]">Drill Net</span>
+                    <span className="font-bold">₹{Math.abs(drillDownTotals.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })} {drillDownTotals.balance >= 0 ? 'Cr' : 'Dr'}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-150 rounded-xl flex-1">
+                <table className="min-w-full divide-y divide-slate-150 finance-caption">
+                  <thead>
+                    <tr className="bg-slate-50">
+                      <th className="finance-small-label uppercase">Sl No</th>
+                      <th className="finance-small-label uppercase">Date</th>
+                      <th className="finance-small-label uppercase">Account / Loan</th>
+                      <th className="text-right finance-small-label uppercase">Debit (Dr)</th>
+                      <th className="text-right finance-small-label uppercase">Credit (Cr)</th>
+                      <th className="finance-small-label uppercase">Particulars</th>
+                      <th className="finance-small-label uppercase">User</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-100">
+                    {drillDownEntries.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-8 text-center text-slate-400 finance-input">
+                          No transactions found.
+                        </td>
+                      </tr>
+                    ) : (
+                      drillDownEntries.map((e, idx) => (
+                        <tr key={e.id} className="hover:bg-slate-50/30">
+                          <td className="px-3 py-2.5 text-slate-500 finance-input">{idx + 1}</td>
+                          <td className="px-3 py-2.5 text-slate-650 whitespace-nowrap finance-input">
+                            {e.date.split('-').reverse().join('/')}
+                          </td>
+                          <td className="px-3 py-2.5 font-mono text-slate-900 font-black">{e.account_number}</td>
+                          <td className="px-3 py-2.5 text-right text-rose-600 whitespace-nowrap font-medium">
+                            {e.debit > 0 ? `₹${e.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-emerald-600 whitespace-nowrap font-medium">
+                            {e.credit > 0 ? `₹${e.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                          </td>
+                          <td className="px-3 py-2.5 text-slate-700 max-w-xs break-words finance-input">{e.particulars}</td>
+                          <td className="px-3 py-2.5 text-slate-500 uppercase finance-input">{e.user}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
-          {selectedAccount && (
-            <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded border border-slate-200 finance-small-label uppercase">
-              {displayedTransactions.length} ROWS
-            </span>
-          )}
         </div>
-        
-        {loading ? (
-          <div className="flex justify-center py-16">
-            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-[#0b1329]"></div>
-          </div>
-        ) : !selectedAccount ? (
-          <div className="py-24 text-center border-t border-dashed border-slate-200 mx-4 my-4 rounded-xl">
-            <span className="text-slate-400 finance-sidebar-link uppercase">Pick an account to drill down</span>
-          </div>
-        ) : displayedTransactions.length === 0 ? (
-          <div className="py-24 text-center border-t border-dashed border-slate-200 mx-4 my-4 rounded-xl">
-            <p className="text-slate-400 finance-sidebar-link uppercase">No Transactions Found</p>
-            <p className="text-slate-400 mt-1 finance-header-time uppercase">Try adjusting the date range.</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
+      )}
+
+      {/* PRINT PREVIEW */}
+      <FinancePrintPreview
+        isOpen={showPrintPreview}
+        onClose={() => setShowPrintPreview(false)}
+        title="General Ledger Summary"
+        documentTitle={`GENERAL LEDGER SUMMARY: ${displayDateRange}`}
+      >
+        {!loading && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-end border-b border-slate-900 pb-2">
+              <div>
+                <h2 className="text-xl font-bold uppercase text-slate-900">Thirumala Group Finance</h2>
+                <p className="text-[13px] uppercase text-slate-500">General Ledger Summary Statement</p>
+              </div>
+              <div className="text-right text-[13px] text-slate-600">
+                <p>Period: {startDate.split('-').reverse().join('/')} to {endDate.split('-').reverse().join('/')}</p>
+              </div>
+            </div>
+
+            <table className="w-full border-collapse text-[11px]">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="px-4 py-3 text-slate-500 finance-small-label uppercase">Date</th>
-                  <th className="px-4 py-3 text-slate-500 finance-small-label uppercase">Particulars</th>
-                  <th className="px-4 py-3 text-slate-500 finance-small-label uppercase">Voucher / Ref</th>
-                  <th className="px-4 py-3 text-slate-500 text-right finance-small-label uppercase">Credit</th>
-                  <th className="px-4 py-3 text-slate-500 text-right finance-small-label uppercase">Debit</th>
-                  <th className="px-4 py-3 text-slate-500 text-right finance-small-label uppercase">Balance</th>
-                  <th className="px-4 py-3 text-slate-500 finance-small-label uppercase">User</th>
+                <tr className="border-b-2 border-slate-800 bg-slate-100">
+                  <th className="p-2 text-left border">Head of Account</th>
+                  <th className="p-2 text-right border">Debit (Dr)</th>
+                  <th className="p-2 text-right border">Credit (Cr)</th>
+                  <th className="p-2 text-right border">Balance</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
-                <tr className="bg-slate-50/50">
-                  <td colSpan={5} className="px-4 py-2 text-slate-700 text-right finance-header-time uppercase">Opening Balance</td>
-                  <td className="px-4 py-2 text-slate-900 text-right finance-header-time">₹{openingBalance.toLocaleString('en-IN')}</td>
-                  <td></td>
-                </tr>
-                {displayedTransactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-slate-700 whitespace-nowrap finance-header-time">
-                      {new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+              <tbody>
+                {summaryData.map(s => (
+                  <tr key={s.head} className="border-b">
+                    <td className="p-2 border font-bold uppercase">{s.head}</td>
+                    <td className="p-2 border text-right text-red-650">
+                      {s.debit > 0 ? `₹${s.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
                     </td>
-                    <td className="px-4 py-3 text-slate-600 max-w-[250px] truncate finance-header-time" title={tx.particulars}>{tx.particulars}</td>
-                    <td className="px-4 py-3 font-mono text-slate-400 finance-header-time">{tx.voucherNo}</td>
-                    <td className="px-4 py-3 text-emerald-600 text-right finance-header-time">{tx.credit > 0 ? `₹${tx.credit.toLocaleString('en-IN')}` : '-'}</td>
-                    <td className="px-4 py-3 text-red-600 text-right finance-header-time">{tx.debit > 0 ? `₹${tx.debit.toLocaleString('en-IN')}` : '-'}</td>
-                    <td className="px-4 py-3 text-slate-800 text-right finance-header-time">₹{tx.runningBalance.toLocaleString('en-IN')}</td>
-                    <td className="px-4 py-3 text-slate-500 finance-header-time">{tx.user}</td>
+                    <td className="p-2 border text-right text-green-650">
+                      {s.credit > 0 ? `₹${s.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                    </td>
+                    <td className={`p-2 border text-right font-black ${s.balance >= 0 ? 'text-emerald-800' : 'text-rose-850'}`}>
+                      ₹{Math.abs(s.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })} {s.balance >= 0 ? 'Cr' : 'Dr'}
+                    </td>
                   </tr>
                 ))}
-                <tr className="bg-slate-50 border-t-2 border-slate-200">
-                  <td colSpan={3} className="px-4 py-3 text-slate-700 text-right finance-header-time uppercase">Closing Balance</td>
-                  <td className="px-4 py-3 text-emerald-600 text-right finance-header-time">₹{totalCredits.toLocaleString('en-IN')}</td>
-                  <td className="px-4 py-3 text-red-600 text-right finance-header-time">₹{totalDebits.toLocaleString('en-IN')}</td>
-                  <td className="px-4 py-3 text-slate-900 text-right finance-sidebar-link">₹{closingBalance.toLocaleString('en-IN')}</td>
-                  <td></td>
+                <tr className="font-bold bg-slate-50 border-t-2 border-slate-800">
+                  <td className="p-2 border uppercase">Grand Total:</td>
+                  <td className="p-2 border text-right text-red-700">₹{overallTotals.debit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                  <td className="p-2 border text-right text-green-700">₹{overallTotals.credit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                  <td className={`p-2 border text-right font-black ${overallTotals.balance >= 0 ? 'text-emerald-900' : 'text-rose-900'}`}>
+                    ₹{Math.abs(overallTotals.balance).toLocaleString('en-IN', { minimumFractionDigits: 2 })} {overallTotals.balance >= 0 ? 'Cr' : 'Dr'}
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
         )}
-      </div>
-
-      {/* Print Preview Modal */}
-      <FinancePrintPreview
-        isOpen={showPrintPreview}
-        onClose={() => setShowPrintPreview(false)}
-        title="General Ledger Report"
-        documentTitle={`GENERAL LEDGER: ${selectedAccount ? selectedAccount.toUpperCase() : 'NO ACCOUNT SELECTED'}`}
-      >
-        <div className="space-y-6 pb-12">
-          {/* Print Headers */}
-          <div className="grid grid-cols-2 gap-4 border-b border-slate-900 pb-4 mb-4">
-            <div>
-              <p className="text-slate-500 finance-small-label uppercase">Date Range</p>
-              <p className="text-slate-900 finance-sidebar-link">{displayDateRange}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-slate-500 finance-small-label uppercase">Account Details</p>
-              <p className="text-slate-900 finance-sidebar-link">{selectedAccountType ? selectedAccountType.toUpperCase() : 'N/A'} &rarr; {selectedAccount ? selectedAccount.toUpperCase() : 'N/A'}</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-4 gap-4 border-b border-t border-slate-900 py-4 mb-6 text-center">
-            <div>
-              <p className="text-slate-500 finance-small-label uppercase">Opening Balance</p>
-              <p className="text-slate-900 finance-sidebar-link">₹{openingBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
-            </div>
-            <div>
-              <p className="text-slate-500 finance-small-label uppercase">Total Credits</p>
-              <p className="text-emerald-700 finance-sidebar-link">₹{totalCredits.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
-            </div>
-            <div>
-              <p className="text-slate-500 finance-small-label uppercase">Total Debits</p>
-              <p className="text-red-700 finance-sidebar-link">₹{totalDebits.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
-            </div>
-            <div>
-              <p className="text-slate-500 finance-small-label uppercase">Closing Balance</p>
-              <p className="text-slate-900 finance-sidebar-link">₹{closingBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
-            </div>
-          </div>
-
-          {/* Transactions Print Table */}
-          <div className="border border-slate-900">
-            <div className="bg-slate-100 border-b border-slate-900 px-4 py-2 flex justify-between">
-              <h4 className="text-slate-900 finance-small-label uppercase">Transactions Ledger</h4>
-              <span className="text-slate-500 finance-small-label">{displayedTransactions.length} ROWS</span>
-            </div>
-            <table className="w-full text-left finance-caption">
-              <thead>
-                <tr className="border-b border-slate-900 bg-slate-50">
-                  <th className="px-2 py-2 text-slate-800 border-r border-slate-300 finance-input">Date</th>
-                  <th className="px-2 py-2 text-slate-800 border-r border-slate-300 finance-input">Particulars</th>
-                  <th className="px-2 py-2 text-slate-800 border-r border-slate-300 finance-input">Voucher</th>
-                  <th className="px-2 py-2 text-emerald-800 text-right border-r border-slate-300 finance-input">Credit</th>
-                  <th className="px-2 py-2 text-red-800 text-right border-r border-slate-300 finance-input">Debit</th>
-                  <th className="px-2 py-2 text-slate-800 text-right finance-input">Balance</th>
-                </tr>
-              </thead>
-              <tbody className="font-mono finance-small-label">
-                {!selectedAccount ? (
-                  <tr>
-                    <td colSpan={6} className="text-center py-8 text-slate-500 font-sans finance-input uppercase">No account selected for print</td>
-                  </tr>
-                ) : displayedTransactions.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="text-center py-8 text-slate-500 font-sans finance-input uppercase">No transactions in this period</td>
-                  </tr>
-                ) : (
-                  <>
-                    <tr className="border-b border-slate-300 bg-slate-50/50">
-                      <td colSpan={5} className="px-2 py-2 text-slate-700 text-right border-r border-slate-300 finance-input uppercase">Opening Balance</td>
-                      <td className="px-2 py-2 text-slate-900 text-right finance-input">₹{openingBalance.toLocaleString('en-IN')}</td>
-                    </tr>
-                    {displayedTransactions.map((tx) => (
-                      <tr key={tx.id} className="border-b border-slate-200 last:border-0">
-                        <td className="px-2 py-1 border-r border-slate-200 whitespace-nowrap">{new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })}</td>
-                        <td className="px-2 py-1 text-slate-700 truncate max-w-[200px] border-r border-slate-200">{tx.particulars}</td>
-                        <td className="px-2 py-1 text-slate-500 border-r border-slate-200">{tx.voucherNo}</td>
-                        <td className="px-2 py-1 text-right text-emerald-700 border-r border-slate-200">{tx.credit > 0 ? tx.credit.toLocaleString('en-IN') : ''}</td>
-                        <td className="px-2 py-1 text-right text-red-700 border-r border-slate-200">{tx.debit > 0 ? tx.debit.toLocaleString('en-IN') : ''}</td>
-                        <td className="px-2 py-1 text-right text-slate-900 finance-input">₹{tx.runningBalance.toLocaleString('en-IN')}</td>
-                      </tr>
-                    ))}
-                    <tr className="border-t-2 border-slate-900 bg-slate-50">
-                      <td colSpan={3} className="px-2 py-2 text-slate-900 text-right border-r border-slate-300 finance-input uppercase">Closing Balance</td>
-                      <td className="px-2 py-2 text-right text-emerald-700 border-r border-slate-300 finance-input">₹{totalCredits.toLocaleString('en-IN')}</td>
-                      <td className="px-2 py-2 text-right text-red-700 border-r border-slate-300 finance-input">₹{totalDebits.toLocaleString('en-IN')}</td>
-                      <td className="px-2 py-2 text-right text-slate-900 finance-sidebar-link">₹{closingBalance.toLocaleString('en-IN')}</td>
-                    </tr>
-                  </>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
       </FinancePrintPreview>
     </div>
   );
