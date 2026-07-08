@@ -138,3 +138,14 @@ old software/
 scripts/cd120_*.json
 scripts/inspect_cd*.mjs
 scripts/repair_cd*.mjs
+
+# Recent forensic / audit scratch files
+forensic_trace.mjs
+scratch_audit.ts
+audit_raw.mjs
+trigger_check.mjs
+scratch_cd120_audit.txt
+forensic_verify.mjs
+scratch.ts
+legacy_system_audit.md
+test_cd_dues.ts
